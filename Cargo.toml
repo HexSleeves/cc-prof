@@ -3,7 +3,7 @@ name        = "ccprof"
 version     = "0.1.0"
 edition     = "2024"
 description = "Claude Code Profile Switcher - manage multiple user settings profiles"
-authors     = ["Your Name <your.email@example.com>"]
+authors     = ["HexSleeves <lecoqjacob@gmail.com>"]
 license     = "MIT"
 
 [[bin]]
