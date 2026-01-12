@@ -17,6 +17,12 @@ pub struct Paths {
     pub claude_dir: PathBuf,
     /// ~/.claude/settings.json
     pub claude_settings: PathBuf,
+    /// ~/.claude/agents
+    pub claude_agents: PathBuf,
+    /// ~/.claude/hooks
+    pub claude_hooks: PathBuf,
+    /// ~/.claude/commands
+    pub claude_commands: PathBuf,
 }
 
 impl Paths {
@@ -30,6 +36,9 @@ impl Paths {
         let state_file = base_dir.join("state.json");
         let claude_dir = home.join(".claude");
         let claude_settings = claude_dir.join("settings.json");
+        let claude_agents = claude_dir.join("agents");
+        let claude_hooks = claude_dir.join("hooks");
+        let claude_commands = claude_dir.join("commands");
 
         Ok(Self {
             base_dir,
@@ -38,6 +47,9 @@ impl Paths {
             state_file,
             claude_dir,
             claude_settings,
+            claude_agents,
+            claude_hooks,
+            claude_commands,
         })
     }
 
@@ -49,6 +61,11 @@ impl Paths {
     /// Get the path to a specific profile directory
     pub fn profile_dir(&self, name: &str) -> PathBuf {
         self.profiles_dir.join(name)
+    }
+
+    /// Get the path to a specific profile's metadata file
+    pub fn profile_metadata(&self, name: &str) -> PathBuf {
+        self.profile_dir(name).join("profile.json")
     }
 
     /// Check if a path is within the profiles directory

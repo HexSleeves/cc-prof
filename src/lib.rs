@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod components;
 pub mod doctor;
 pub mod paths;
 pub mod profiles;

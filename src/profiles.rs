@@ -1,10 +1,14 @@
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use crate::components::{Component, ProfileMetadata};
 use crate::paths::Paths;
+use crate::switch::copy_dir_recursive;
 
 /// List all profile names (directories under profiles/)
+/// Automatically migrates legacy profiles (creates profile.json)
 pub fn list_profiles(paths: &Paths) -> Result<Vec<String>> {
     if !paths.profiles_dir.exists() {
         return Ok(Vec::new());
@@ -26,10 +30,18 @@ pub fn list_profiles(paths: &Paths) -> Result<Vec<String>> {
         if path.is_dir() {
             // Check if it has a settings.json
             let settings_path = path.join("settings.json");
+            let metadata_path = path.join("profile.json");
+
             if settings_path.exists()
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
             {
                 profiles.push(name.to_string());
+
+                // Auto-migrate legacy profiles (silent)
+                if !metadata_path.exists() {
+                    // This is a legacy profile - create profile.json
+                    let _ = ProfileMetadata::migrate_legacy(&path);
+                }
             }
         }
     }
@@ -97,6 +109,63 @@ pub fn create_profile_from(paths: &Paths, name: &str, source: &Path) -> Result<(
     Ok(())
 }
 
+/// Create a new profile with selected components
+pub fn create_profile_with_components(
+    paths: &Paths,
+    name: &str,
+    components: HashSet<Component>,
+) -> Result<()> {
+    validate_profile_name(name)?;
+
+    if profile_exists(paths, name) {
+        bail!("Profile '{}' already exists", name);
+    }
+
+    if components.is_empty() {
+        bail!("At least one component must be selected");
+    }
+
+    // Create profile directory
+    let profile_dir = paths.profile_dir(name);
+    fs::create_dir_all(&profile_dir)
+        .with_context(|| format!("Failed to create profile directory: {:?}", profile_dir))?;
+
+    // Copy each selected component
+    for component in &components {
+        let source = component.source_path(paths);
+        let dest = component.profile_path(paths, name);
+
+        if !source.exists() {
+            bail!(
+                "Component {} does not exist at {:?}\n\
+                 Hint: This component is not present in your ~/.claude/ directory.\n\
+                 You can either create it first, or deselect this component.",
+                component.display_name(),
+                source
+            );
+        }
+
+        if component.is_file() {
+            // Validate JSON for settings component
+            if matches!(component, Component::Settings) {
+                validate_json_file(&source)?;
+            }
+            fs::copy(&source, &dest)
+                .with_context(|| format!("Failed to copy file: {:?} -> {:?}", source, dest))?;
+        } else {
+            // Copy directory recursively
+            copy_dir_recursive(&source, &dest)
+                .with_context(|| format!("Failed to copy directory: {:?} -> {:?}", source, dest))?;
+        }
+    }
+
+    // Create metadata
+    let metadata = ProfileMetadata::new(name.to_string(), components);
+    metadata.write(&profile_dir)?;
+
+    Ok(())
+}
+
 /// Validate that a file contains valid JSON
 pub fn validate_json_file(path: &Path) -> Result<()> {
     let content =
@@ -153,6 +222,9 @@ mod tests {
             state_file: temp_dir.path().join(".claude-profiles/state.json"),
             claude_dir: temp_dir.path().join(".claude"),
             claude_settings: temp_dir.path().join(".claude/settings.json"),
+            claude_agents: temp_dir.path().join(".claude/agents"),
+            claude_hooks: temp_dir.path().join(".claude/hooks"),
+            claude_commands: temp_dir.path().join(".claude/commands"),
         }
     }
 

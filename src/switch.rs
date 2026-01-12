@@ -1,13 +1,11 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::symlink;
-use std::path::Path;
-use tempfile::NamedTempFile;
+use std::path::{Path, PathBuf};
 
+use crate::components::{Component, ProfileMetadata};
 use crate::paths::Paths;
-use crate::profiles::validate_json_file;
 use crate::state::LockedState;
 
 /// Information about the current settings file status
@@ -80,38 +78,60 @@ impl std::fmt::Display for SettingsStatus {
     }
 }
 
-/// Switch to a profile by creating a symlink or copying
+/// Switch to a profile by creating symlinks for all managed components
 pub fn switch_to_profile(paths: &Paths, profile_name: &str) -> Result<()> {
-    let profile_settings = paths.profile_settings(profile_name);
+    let profile_dir = paths.profile_dir(profile_name);
 
-    // Validate profile exists and has valid JSON
-    if !profile_settings.exists() {
+    // Check if profile directory exists
+    if !profile_dir.exists() {
         bail!(
             "Profile '{}' does not exist.\n\
-             Expected file at: {:?}\n\
              Hint: Use 'ccprof list' to see available profiles,\n\
              or 'ccprof add {} --from-current' to create it.",
             profile_name,
-            profile_settings,
             profile_name
         );
     }
 
-    validate_json_file(&profile_settings)
-        .with_context(|| format!("Profile '{}' has invalid JSON", profile_name))?;
+    // Read profile metadata
+    let metadata = ProfileMetadata::read(&profile_dir)?;
+
+    // Validate all managed components exist in profile
+    for component in &metadata.managed_components {
+        let component_path = component.profile_path(paths, profile_name);
+        if !component_path.exists() {
+            bail!(
+                "Profile '{}' is missing component: {}\n\
+                 Expected at: {:?}\n\
+                 \n\
+                 This profile may be corrupted. Try:\n\
+                   ccprof doctor",
+                profile_name,
+                component.display_name(),
+                component_path
+            );
+        }
+    }
 
     // Ensure ~/.claude/ directory exists
     fs::create_dir_all(&paths.claude_dir)
         .with_context(|| format!("Failed to create Claude directory: {:?}", paths.claude_dir))?;
 
-    // Check current status and backup if needed
-    let status = SettingsStatus::detect(&paths.claude_settings);
-    backup_if_needed(paths, &status)?;
+    // Switch each managed component
+    for component in &metadata.managed_components {
+        let source = component.source_path(paths);
+        let target = component.profile_path(paths, profile_name);
 
-    // Try symlink first, fallback to atomic copy
-    if let Err(_symlink_err) = create_symlink(paths, &profile_settings) {
-        // Symlink failed, use atomic copy fallback
-        atomic_copy(&profile_settings, &paths.claude_settings)?;
+        // Detect current status
+        let status = ComponentStatus::detect(&source);
+
+        // Backup if needed
+        if status.needs_backup(paths, &source) {
+            backup_component(paths, component, &source)?;
+        }
+
+        // Create symlink
+        create_component_symlink(&source, &target, component)?;
     }
 
     // Update state with lock
@@ -123,20 +143,108 @@ pub fn switch_to_profile(paths: &Paths, profile_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Backup the current settings file if it's not already a profile symlink
-fn backup_if_needed(paths: &Paths, status: &SettingsStatus) -> Result<()> {
-    // Only backup if it exists and is NOT a symlink into profiles dir
-    let needs_backup = match status {
-        SettingsStatus::Missing | SettingsStatus::BrokenSymlink { .. } => false,
-        SettingsStatus::RegularFile => true,
-        SettingsStatus::Symlink { .. } => !status.is_profile_symlink(paths),
-    };
+/// Status of a component (file or directory)
+#[derive(Debug, Clone)]
+pub enum ComponentStatus {
+    /// Component is missing
+    Missing,
+    /// Regular file (not a symlink)
+    RegularFile,
+    /// Regular directory (not a symlink)
+    RegularDirectory,
+    /// Symlink pointing to the given target
+    Symlink { target: PathBuf },
+    /// Broken symlink (target doesn't exist)
+    BrokenSymlink { target: PathBuf },
+}
 
-    if !needs_backup {
-        return Ok(());
+impl ComponentStatus {
+    /// Detect the status of a component (file or directory)
+    pub fn detect(path: &Path) -> Self {
+        // Check if it's a symlink first (before checking exists)
+        match fs::read_link(path) {
+            Ok(target) => {
+                // It's a symlink - check if target exists
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    path.parent().unwrap_or(Path::new(".")).join(&target)
+                };
+
+                if resolved.exists() {
+                    ComponentStatus::Symlink { target }
+                } else {
+                    ComponentStatus::BrokenSymlink { target }
+                }
+            }
+            Err(_) => {
+                // Not a symlink - check if file/directory exists
+                if !path.exists() {
+                    ComponentStatus::Missing
+                } else if path.is_dir() {
+                    ComponentStatus::RegularDirectory
+                } else {
+                    ComponentStatus::RegularFile
+                }
+            }
+        }
     }
 
-    // Ensure backups directory exists
+    /// Check if this component needs backup before switching
+    pub fn needs_backup(&self, paths: &Paths, component_source: &Path) -> bool {
+        match self {
+            ComponentStatus::Missing | ComponentStatus::BrokenSymlink { .. } => false,
+            ComponentStatus::RegularFile | ComponentStatus::RegularDirectory => true,
+            ComponentStatus::Symlink { target } => {
+                // Only backup if symlink points outside profiles dir
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    component_source
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .join(target)
+                };
+                !paths.is_in_profiles_dir(&resolved)
+            }
+        }
+    }
+}
+
+/// Recursively copy a directory
+pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if !src.exists() {
+        bail!("Source directory does not exist: {:?}", src);
+    }
+
+    if !src.is_dir() {
+        bail!("Source is not a directory: {:?}", src);
+    }
+
+    fs::create_dir_all(dst)
+        .with_context(|| format!("Failed to create destination directory: {:?}", dst))?;
+
+    for entry in
+        fs::read_dir(src).with_context(|| format!("Failed to read source directory: {:?}", src))?
+    {
+        let entry = entry.context("Failed to read directory entry")?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!("Failed to copy file: {:?} -> {:?}", src_path, dst_path)
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Backup a component (file or directory) before switching
+pub fn backup_component(paths: &Paths, component: &Component, source: &Path) -> Result<()> {
     fs::create_dir_all(&paths.backups_dir).with_context(|| {
         format!(
             "Failed to create backups directory: {:?}",
@@ -144,76 +252,71 @@ fn backup_if_needed(paths: &Paths, status: &SettingsStatus) -> Result<()> {
         )
     })?;
 
-    // Generate backup filename with timestamp
     let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
-    let backup_name = format!("settings.json.{}.bak", timestamp);
+    let backup_name = match component {
+        Component::Settings => format!("settings.json.{}.bak", timestamp),
+        Component::Agents => format!("agents.{}.bak", timestamp),
+        Component::Hooks => format!("hooks.{}.bak", timestamp),
+        Component::Commands => format!("commands.{}.bak", timestamp),
+    };
     let backup_path = paths.backups_dir.join(backup_name);
 
-    // Copy current file to backup
-    fs::copy(&paths.claude_settings, &backup_path)
-        .with_context(|| format!("Failed to create backup at: {:?}", backup_path))?;
-
-    Ok(())
-}
-
-/// Create a symlink from claude settings to profile settings
-fn create_symlink(paths: &Paths, profile_settings: &Path) -> Result<()> {
-    // Remove existing file/symlink if present
-    if paths.claude_settings.exists() || fs::read_link(&paths.claude_settings).is_ok() {
-        fs::remove_file(&paths.claude_settings).with_context(|| {
+    if component.is_file() {
+        // File backup
+        fs::copy(source, &backup_path)
+            .with_context(|| format!("Failed to backup file: {:?} -> {:?}", source, backup_path))?;
+    } else {
+        // Directory backup (recursive copy)
+        copy_dir_recursive(source, &backup_path).with_context(|| {
             format!(
-                "Failed to remove existing settings file: {:?}",
-                paths.claude_settings
+                "Failed to backup directory: {:?} -> {:?}",
+                source, backup_path
             )
         })?;
     }
 
-    // Create symlink: claude_settings -> profile_settings
-    symlink(profile_settings, &paths.claude_settings).with_context(|| {
-        format!(
-            "Failed to create symlink: {:?} -> {:?}",
-            paths.claude_settings, profile_settings
-        )
-    })?;
-
     Ok(())
 }
 
-/// Atomically copy a file to destination
-fn atomic_copy(source: &Path, dest: &Path) -> Result<()> {
-    let dest_dir = dest
-        .parent()
-        .context("Destination has no parent directory")?;
-
-    // Read source content
-    let content =
-        fs::read(source).with_context(|| format!("Failed to read source file: {:?}", source))?;
-
-    // Create temp file in the same directory as destination (for atomic rename)
-    let mut temp_file = NamedTempFile::new_in(dest_dir)
-        .with_context(|| format!("Failed to create temp file in: {:?}", dest_dir))?;
-
-    // Write content to temp file
-    temp_file
-        .write_all(&content)
-        .context("Failed to write to temp file")?;
-
-    // fsync for durability
-    temp_file
-        .as_file()
-        .sync_all()
-        .context("Failed to sync temp file")?;
-
-    // Remove existing destination if present
-    if dest.exists() || fs::read_link(dest).is_ok() {
-        fs::remove_file(dest)
-            .with_context(|| format!("Failed to remove existing file: {:?}", dest))?;
+/// Create a symlink for a component (file or directory)
+#[cfg_attr(unix, allow(unused_variables))]
+pub fn create_component_symlink(source: &Path, target: &Path, component: &Component) -> Result<()> {
+    // Remove existing file/directory/symlink
+    if source.exists() || fs::read_link(source).is_ok() {
+        if source.is_dir() {
+            fs::remove_dir_all(source)
+                .with_context(|| format!("Failed to remove existing directory: {:?}", source))?;
+        } else {
+            fs::remove_file(source)
+                .with_context(|| format!("Failed to remove existing file: {:?}", source))?;
+        }
     }
 
-    // Atomic rename
-    temp_file
-        .persist(dest)
-        .with_context(|| format!("Failed to rename temp file to: {:?}", dest))?;
+    // Create symlink (Unix for now, Windows support can be added later)
+    #[cfg(unix)]
+    {
+        symlink(target, source)
+            .with_context(|| format!("Failed to create symlink: {:?} -> {:?}", source, target))?;
+    }
+
+    #[cfg(windows)]
+    {
+        if component.is_file() {
+            std::os::windows::fs::symlink_file(target, source).with_context(|| {
+                format!(
+                    "Failed to create file symlink: {:?} -> {:?}",
+                    source, target
+                )
+            })?;
+        } else {
+            std::os::windows::fs::symlink_dir(target, source).with_context(|| {
+                format!(
+                    "Failed to create directory symlink: {:?} -> {:?}",
+                    source, target
+                )
+            })?;
+        }
+    }
 
     Ok(())
 }
@@ -231,6 +334,9 @@ mod tests {
             state_file: temp_dir.path().join(".claude-profiles/state.json"),
             claude_dir: temp_dir.path().join(".claude"),
             claude_settings: temp_dir.path().join(".claude/settings.json"),
+            claude_agents: temp_dir.path().join(".claude/agents"),
+            claude_hooks: temp_dir.path().join(".claude/hooks"),
+            claude_commands: temp_dir.path().join(".claude/commands"),
         }
     }
 
@@ -302,20 +408,6 @@ mod tests {
 
         let status = SettingsStatus::detect(&paths.claude_settings);
         assert!(!status.is_profile_symlink(&paths));
-    }
-
-    #[test]
-    fn test_atomic_copy() {
-        let temp_dir = TempDir::new().unwrap();
-        let source = temp_dir.path().join("source.json");
-        let dest = temp_dir.path().join("dest.json");
-
-        fs::write(&source, r#"{"test": true}"#).unwrap();
-        atomic_copy(&source, &dest).unwrap();
-
-        assert!(dest.exists());
-        let content = fs::read_to_string(&dest).unwrap();
-        assert_eq!(content, r#"{"test": true}"#);
     }
 
     #[test]

@@ -1,10 +1,14 @@
 use anstyle::AnsiColor;
 use anyhow::{Context, Result, bail};
+use inquire::MultiSelect;
+use std::collections::HashSet;
+use std::path::Path;
 use std::process::Command;
 
+use crate::components::Component;
 use crate::doctor::run_doctor;
 use crate::paths::Paths;
-use crate::profiles::{create_profile_from, list_profiles, profile_exists};
+use crate::profiles::{create_profile_with_components, list_profiles, profile_exists};
 use crate::state::State;
 use crate::switch::{SettingsStatus, switch_to_profile};
 use crate::ui::Ui;
@@ -30,6 +34,7 @@ pub fn list(paths: &Paths, ui: &Ui) -> Result<()> {
     table.set_header(vec![
         ui.header_cell(""),
         ui.header_cell("Profile"),
+        ui.header_cell("Components"),
         ui.header_cell("Status"),
     ]);
 
@@ -42,7 +47,34 @@ pub fn list(paths: &Paths, ui: &Ui) -> Result<()> {
             ui.cell("-")
         };
 
-        table.add_row(vec![ui.cell(icon), ui.cell(name), status_cell]);
+        // Read profile metadata to show components
+        let profile_dir = paths.profile_dir(name);
+        let components_display = match crate::components::ProfileMetadata::read(&profile_dir) {
+            Ok(metadata) => {
+                let mut comp_codes: Vec<&str> = metadata
+                    .managed_components
+                    .iter()
+                    .map(|c| c.short_name())
+                    .collect();
+                comp_codes.sort();
+                let display = comp_codes.join(",");
+
+                // Show migration indicator if migrated
+                if metadata.migration.is_some() {
+                    format!("{} (migrated)", display)
+                } else {
+                    display
+                }
+            }
+            Err(_) => String::from("?"),
+        };
+
+        table.add_row(vec![
+            ui.cell(icon),
+            ui.cell(name),
+            ui.cell(components_display),
+            status_cell,
+        ]);
     }
 
     ui.section("Profiles");
@@ -119,8 +151,188 @@ pub fn current(paths: &Paths, ui: &Ui) -> Result<()> {
     Ok(())
 }
 
+/// Show detailed information about a profile
+pub fn inspect(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
+    if !profile_exists(paths, name) {
+        bail!(
+            "Profile '{}' does not exist.\\n\\\n             Use 'ccprof list' to see available profiles.",
+            name
+        );
+    }
+
+    let profile_dir = paths.profile_dir(name);
+    let metadata = crate::components::ProfileMetadata::read(&profile_dir)?;
+
+    ui.section(format!("Profile: {}", name));
+    ui.newline();
+
+    // Build metadata table
+    let mut table = ui.simple_table();
+
+    table.add_row(vec![
+        ui.cell("Created:"),
+        ui.cell(metadata.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+    ]);
+
+    table.add_row(vec![
+        ui.cell("Updated:"),
+        ui.cell(metadata.updated_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+    ]);
+
+    table.add_row(vec![ui.cell("Version:"), ui.cell(&metadata.version)]);
+
+    if let Some(migration) = &metadata.migration {
+        table.add_row(vec![
+            ui.cell("Migration:"),
+            ui.colored_cell(
+                format!(
+                    "Migrated from legacy ({})",
+                    migration.migration_date.format("%Y-%m-%d")
+                ),
+                AnsiColor::Yellow,
+            ),
+        ]);
+    }
+
+    ui.println(table.to_string());
+    ui.newline();
+
+    // Show managed components with sizes
+    ui.section("Managed Components");
+    ui.newline();
+
+    let mut comp_table = ui.simple_table();
+    comp_table.set_header(vec![
+        ui.header_cell("Component"),
+        ui.header_cell("Path"),
+        ui.header_cell("Size"),
+    ]);
+
+    for component in &metadata.managed_components {
+        let path = component.profile_path(paths, name);
+
+        if path.exists() {
+            let size_str = calculate_size(&path)?;
+            comp_table.add_row(vec![
+                ui.cell(component.display_name()),
+                ui.cell(format!("{}", path.display())),
+                ui.cell(size_str),
+            ]);
+        } else {
+            comp_table.add_row(vec![
+                ui.cell(component.display_name()),
+                ui.cell(format!("{}", path.display())),
+                ui.colored_cell("missing", AnsiColor::Red),
+            ]);
+        }
+    }
+
+    ui.println(comp_table.to_string());
+
+    Ok(())
+}
+
+/// Calculate human-readable size of a file or directory
+fn calculate_size(path: &Path) -> Result<String> {
+    use std::fs;
+
+    let size = if path.is_file() {
+        fs::metadata(path)
+            .with_context(|| format!("Failed to read metadata for {}", path.display()))?
+            .len()
+    } else if path.is_dir() {
+        // Recursively calculate directory size
+        fn dir_size(path: &Path) -> std::io::Result<u64> {
+            let mut total = 0;
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let metadata = entry.metadata()?;
+                if metadata.is_file() {
+                    total += metadata.len();
+                } else if metadata.is_dir() {
+                    total += dir_size(&entry.path())?;
+                }
+            }
+            Ok(total)
+        }
+        dir_size(path)
+            .with_context(|| format!("Failed to calculate size for {}", path.display()))?
+    } else {
+        0
+    };
+
+    Ok(format_bytes(size))
+}
+
+/// Format bytes as human-readable string
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Interactive component selection for profile creation
+pub fn select_components(paths: &Paths) -> Result<HashSet<Component>> {
+    let all_components = Component::all();
+
+    // Build display options with availability indicators
+    let options: Vec<String> = all_components
+        .iter()
+        .map(|c| {
+            let path = c.source_path(paths);
+            let exists = path.exists();
+            let indicator = if exists { "✓" } else { "✗" };
+            let availability = if exists { "" } else { " (not found)" };
+            format!("{} {}{}", indicator, c.display_name(), availability)
+        })
+        .collect();
+
+    // Default: select all components that exist
+    let defaults: Vec<usize> = all_components
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.source_path(paths).exists())
+        .map(|(i, _)| i)
+        .collect();
+
+    let selected_indices = MultiSelect::new(
+        "Which components should this profile manage?",
+        options.clone(),
+    )
+    .with_default(&defaults)
+    .with_help_message("Space to select, Enter to confirm")
+    .prompt()
+    .context("Component selection cancelled")?;
+
+    let selected: HashSet<Component> = selected_indices
+        .into_iter()
+        .filter_map(|selected_str| {
+            options
+                .iter()
+                .position(|opt| *opt == selected_str)
+                .map(|idx| all_components[idx])
+        })
+        .collect();
+
+    if selected.is_empty() {
+        bail!("At least one component must be selected");
+    }
+
+    Ok(selected)
+}
+
 /// Add a new profile from current settings
-pub fn add(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
+pub fn add(paths: &Paths, name: &str, ui: &Ui, components_arg: Option<Vec<String>>) -> Result<()> {
     paths.ensure_dirs()?;
 
     if profile_exists(paths, name) {
@@ -132,15 +344,42 @@ pub fn add(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
         );
     }
 
-    create_profile_from(paths, name, &paths.claude_settings)?;
+    // Determine which components to include
+    let components = if let Some(comp_names) = components_arg {
+        // Non-interactive mode: parse component names
+        let mut selected = HashSet::new();
+        for comp_name in comp_names {
+            match comp_name.parse::<Component>() {
+                Ok(c) => {
+                    selected.insert(c);
+                }
+                Err(_) => {
+                    bail!(
+                        "Invalid component name: '{}'\n\
+                         Valid components: settings, agents, hooks, commands",
+                        comp_name
+                    );
+                }
+            }
+        }
+        selected
+    } else {
+        // Interactive mode: use multi-select UI
+        select_components(paths)?
+    };
 
-    ui.ok(format!("Created profile '{}' from current settings", name));
+    // Create profile with selected components
+    create_profile_with_components(paths, name, components.clone())?;
+
+    ui.ok(format!("Created profile '{}'", name));
+    ui.newline();
+    ui.println("Included components:");
+    for component in &components {
+        ui.println(format!("  {} {}", ui.icon_ok(), component.display_name()));
+    }
     ui.newline();
     ui.println("To activate it:");
     ui.println(format!("  ccprof use {}", name));
-    ui.newline();
-    ui.println("To edit it:");
-    ui.println(format!("  ccprof edit {}", name));
 
     Ok(())
 }
@@ -224,6 +463,9 @@ mod tests {
             state_file: temp_dir.path().join(".claude-profiles/state.json"),
             claude_dir: temp_dir.path().join(".claude"),
             claude_settings: temp_dir.path().join(".claude/settings.json"),
+            claude_agents: temp_dir.path().join(".claude/agents"),
+            claude_hooks: temp_dir.path().join(".claude/hooks"),
+            claude_commands: temp_dir.path().join(".claude/commands"),
         }
     }
 
@@ -251,8 +493,8 @@ mod tests {
         fs::create_dir_all(&paths.claude_dir).unwrap();
         fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
 
-        // Add profile
-        add(&paths, "work", &ui).unwrap();
+        // Add profile with explicit components (non-interactive)
+        add(&paths, "work", &ui, Some(vec!["settings".to_string()])).unwrap();
 
         // Verify it exists
         assert!(profile_exists(&paths, "work"));
@@ -268,8 +510,9 @@ mod tests {
         fs::create_dir_all(&paths.claude_dir).unwrap();
         fs::write(&paths.claude_settings, "{}").unwrap();
 
-        add(&paths, "work", &ui).unwrap();
-        assert!(add(&paths, "work", &ui).is_err());
+        // Add profile with explicit components (non-interactive)
+        add(&paths, "work", &ui, Some(vec!["settings".to_string()])).unwrap();
+        assert!(add(&paths, "work", &ui, Some(vec!["settings".to_string()])).is_err());
     }
 
     #[test]

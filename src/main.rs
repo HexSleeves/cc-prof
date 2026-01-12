@@ -32,6 +32,12 @@ enum Commands {
     /// Show the current/active profile and settings file status
     Current,
 
+    /// Show detailed information about a profile
+    Inspect {
+        /// Name of the profile to inspect
+        name: String,
+    },
+
     /// Add a new profile
     Add {
         /// Name of the profile to create
@@ -40,6 +46,11 @@ enum Commands {
         /// Copy settings from current ~/.claude/settings.json
         #[arg(long)]
         from_current: bool,
+
+        /// Components to include (skip interactive selection)
+        /// Comma-separated list: settings,agents,hooks,commands
+        #[arg(long, value_delimiter = ',')]
+        components: Option<Vec<String>>,
     },
 
     /// Switch to a profile (activate it)
@@ -66,11 +77,16 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => commands::list(&paths, &ui),
         Commands::Current => commands::current(&paths, &ui),
-        Commands::Add { name, from_current } => {
+        Commands::Inspect { name } => commands::inspect(&paths, &name, &ui),
+        Commands::Add {
+            name,
+            from_current,
+            components,
+        } => {
             if !from_current {
                 anyhow::bail!("Currently only --from-current is supported for adding profiles");
             }
-            commands::add(&paths, &name, &ui)
+            commands::add(&paths, &name, &ui, components)
         }
         Commands::Use { name } => commands::use_profile(&paths, &name, &ui),
         Commands::Edit { name } => commands::edit(&paths, &name, &ui),

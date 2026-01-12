@@ -2,10 +2,11 @@ use anstyle::AnsiColor;
 use std::env;
 use std::path::Path;
 
+use crate::components::ProfileMetadata;
 use crate::paths::Paths;
-use crate::profiles::{ValidationResult, list_profiles, validate_json_file_result};
+use crate::profiles::list_profiles;
 use crate::state::State;
-use crate::switch::SettingsStatus;
+use crate::switch::{ComponentStatus, SettingsStatus};
 use crate::ui::Ui;
 
 /// Run diagnostics on the ccprof setup
@@ -30,6 +31,12 @@ pub fn run_doctor(paths: &Paths, ui: &Ui) {
     paths_table.add_row(vec![
         "Claude settings",
         &format!("{:?}", paths.claude_settings),
+    ]);
+    paths_table.add_row(vec!["Claude agents", &format!("{:?}", paths.claude_agents)]);
+    paths_table.add_row(vec!["Claude hooks", &format!("{:?}", paths.claude_hooks)]);
+    paths_table.add_row(vec![
+        "Claude commands",
+        &format!("{:?}", paths.claude_commands),
     ]);
     ui.println(paths_table.to_string());
     ui.newline();
@@ -115,26 +122,65 @@ pub fn run_doctor(paths: &Paths, ui: &Ui) {
             profiles_table.set_header(vec![
                 ui.header_cell(""),
                 ui.header_cell("Profile"),
-                ui.header_cell("JSON Status"),
+                ui.header_cell("Components"),
+                ui.header_cell("Metadata"),
+                ui.header_cell("Status"),
             ]);
 
             for name in &profiles {
-                let settings_path = paths.profile_settings(name);
-                let validation = validate_json_file_result(&settings_path);
-                let (icon, status_cell) = match validation {
-                    ValidationResult::Valid => {
-                        (ui.icon_ok(), ui.colored_cell("valid", AnsiColor::Green))
+                let profile_dir = paths.profile_dir(name);
+                let metadata_path = paths.profile_metadata(name);
+
+                // Check metadata file
+                let (meta_icon, meta_status) = if metadata_path.exists() {
+                    match ProfileMetadata::read(&profile_dir) {
+                        Ok(_) => (ui.icon_ok(), "valid"),
+                        Err(_) => (ui.icon_err(), "invalid"),
                     }
-                    ValidationResult::Missing => (
-                        ui.icon_warn(),
-                        ui.colored_cell("missing", AnsiColor::Yellow),
-                    ),
-                    ValidationResult::Invalid(ref e) => (
-                        ui.icon_err(),
-                        ui.colored_cell(format!("invalid: {}", e), AnsiColor::Red),
-                    ),
+                } else {
+                    (ui.icon_warn(), "missing")
                 };
-                profiles_table.add_row(vec![ui.cell(icon), ui.cell(name), status_cell]);
+
+                // Get component info
+                let (components_str, overall_icon, overall_status) =
+                    match ProfileMetadata::read(&profile_dir) {
+                        Ok(metadata) => {
+                            let mut comp_codes: Vec<&str> = metadata
+                                .managed_components
+                                .iter()
+                                .map(|c| c.short_name())
+                                .collect();
+                            comp_codes.sort();
+                            let comp_str = comp_codes.join(",");
+
+                            // Check if all components exist
+                            let mut all_exist = true;
+                            for component in &metadata.managed_components {
+                                let path = component.profile_path(paths, name);
+                                if !path.exists() {
+                                    all_exist = false;
+                                    break;
+                                }
+                            }
+
+                            let (icon, status) = if all_exist {
+                                (ui.icon_ok(), "ok")
+                            } else {
+                                (ui.icon_warn(), "missing components")
+                            };
+
+                            (comp_str, icon, status)
+                        }
+                        Err(_) => (String::from("?"), ui.icon_err(), "metadata error"),
+                    };
+
+                profiles_table.add_row(vec![
+                    ui.cell(overall_icon),
+                    ui.cell(name),
+                    ui.cell(components_str),
+                    ui.cell(format!("{} {}", meta_icon, meta_status)),
+                    ui.cell(overall_status),
+                ]);
             }
             ui.println(profiles_table.to_string());
         }
@@ -148,24 +194,73 @@ pub fn run_doctor(paths: &Paths, ui: &Ui) {
     let state = State::read(&paths.state_file).unwrap_or_default();
     if let Some(ref profile_name) = state.default_profile {
         ui.section("Active Profile Validation");
-        let profile_settings = paths.profile_settings(profile_name);
-        let validation = validate_json_file_result(&profile_settings);
-        match validation {
-            ValidationResult::Valid => {
-                ui.ok(format!("Profile '{}' JSON is valid", profile_name));
-            }
-            ValidationResult::Missing => {
-                ui.err(format!(
-                    "Profile '{}' is set as default but settings file is missing!",
-                    profile_name
+
+        let profile_dir = paths.profile_dir(profile_name);
+        match ProfileMetadata::read(&profile_dir) {
+            Ok(metadata) => {
+                ui.ok(format!(
+                    "Profile '{}' has {} managed component(s)",
+                    profile_name,
+                    metadata.managed_components.len()
                 ));
-                ui.println(format!("  Expected: {:?}", profile_settings));
+
+                // Check each managed component
+                let mut comp_table = ui.simple_table();
+                comp_table.set_header(vec![
+                    ui.header_cell(""),
+                    ui.header_cell("Component"),
+                    ui.header_cell("Profile File"),
+                    ui.header_cell("Symlink Status"),
+                ]);
+
+                for component in &metadata.managed_components {
+                    let profile_path = component.profile_path(paths, profile_name);
+                    let source_path = component.source_path(paths);
+
+                    // Check if profile component exists
+                    let (profile_icon, profile_status) = if profile_path.exists() {
+                        (ui.icon_ok(), "exists")
+                    } else {
+                        (ui.icon_err(), "missing")
+                    };
+
+                    // Check symlink status
+                    let symlink_status = ComponentStatus::detect(&source_path);
+                    let symlink_cell = match symlink_status {
+                        ComponentStatus::Missing => ui.colored_cell("missing", AnsiColor::Yellow),
+                        ComponentStatus::RegularFile | ComponentStatus::RegularDirectory => {
+                            ui.colored_cell("not a symlink", AnsiColor::Yellow)
+                        }
+                        ComponentStatus::Symlink { ref target } => {
+                            if target == &profile_path {
+                                ui.colored_cell(
+                                    format!("{} correct", ui.icon_ok()),
+                                    AnsiColor::Green,
+                                )
+                            } else {
+                                ui.colored_cell(
+                                    format!("{} wrong target", ui.icon_warn()),
+                                    AnsiColor::Yellow,
+                                )
+                            }
+                        }
+                        ComponentStatus::BrokenSymlink { .. } => {
+                            ui.colored_cell(format!("{} broken", ui.icon_err()), AnsiColor::Red)
+                        }
+                    };
+
+                    comp_table.add_row(vec![
+                        ui.cell(profile_icon),
+                        ui.cell(component.display_name()),
+                        ui.cell(profile_status),
+                        symlink_cell,
+                    ]);
+                }
+
+                ui.println(comp_table.to_string());
             }
-            ValidationResult::Invalid(ref err) => {
-                ui.err(format!(
-                    "Profile '{}' has invalid JSON: {}",
-                    profile_name, err
-                ));
+            Err(e) => {
+                ui.err(format!("Profile '{}' metadata error: {}", profile_name, e));
             }
         }
         ui.newline();
@@ -252,6 +347,9 @@ mod tests {
             state_file: temp_dir.path().join(".claude-profiles/state.json"),
             claude_dir: temp_dir.path().join(".claude"),
             claude_settings: temp_dir.path().join(".claude/settings.json"),
+            claude_agents: temp_dir.path().join(".claude/agents"),
+            claude_hooks: temp_dir.path().join(".claude/hooks"),
+            claude_commands: temp_dir.path().join(".claude/commands"),
         };
         let ui = test_ui();
 
