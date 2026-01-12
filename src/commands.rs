@@ -8,7 +8,9 @@ use std::process::Command;
 use crate::components::Component;
 use crate::doctor::run_doctor;
 use crate::paths::Paths;
-use crate::profiles::{create_profile_with_components, list_profiles, profile_exists};
+use crate::profiles::{
+    create_profile_with_components, list_profiles, profile_exists, update_profile_components,
+};
 use crate::state::State;
 use crate::switch::{SettingsStatus, switch_to_profile};
 use crate::ui::Ui;
@@ -440,6 +442,131 @@ pub fn edit(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
 
     ui.ok(format!("Opened {} in editor", settings_path.display()));
     Ok(())
+}
+
+/// Edit a profile's tracked components
+pub fn edit_components(
+    paths: &Paths,
+    name: &str,
+    ui: &Ui,
+    components_arg: Option<Vec<String>>,
+) -> Result<()> {
+    if !profile_exists(paths, name) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Use 'ccprof list' to see available profiles.",
+            name
+        );
+    }
+
+    let profile_dir = paths.profile_dir(name);
+    let metadata = crate::components::ProfileMetadata::read(&profile_dir)?;
+
+    // Determine which components to use
+    let new_components = if let Some(comp_names) = components_arg {
+        // Interactive mode: use multi-select UI with current selection as default
+        if comp_names.is_empty() {
+            edit_select_components(paths, &metadata.managed_components)?
+        } else {
+            // Non-interactive mode: parse component names
+            let mut selected = HashSet::new();
+            for comp_name in comp_names {
+                match comp_name.parse::<Component>() {
+                    Ok(c) => {
+                        selected.insert(c);
+                    }
+                    Err(_) => {
+                        bail!(
+                            "Invalid component name: '{}'\n\
+                         Valid components: settings, agents, hooks, commands",
+                            comp_name
+                        );
+                    }
+                }
+            }
+            selected
+        }
+    } else {
+        bail!("No components specified");
+    };
+
+    // Update the profile components
+    update_profile_components(paths, name, new_components.clone())?;
+
+    ui.ok(format!("Updated components for profile '{}'", name));
+    ui.newline();
+    ui.println("Now tracking:");
+    for component in &new_components {
+        ui.println(format!("  {} {}", ui.icon_ok(), component.display_name()));
+    }
+
+    Ok(())
+}
+
+/// Interactive component selection for editing profile components
+fn edit_select_components(
+    paths: &Paths,
+    current_components: &HashSet<Component>,
+) -> Result<HashSet<Component>> {
+    let all_components = Component::all();
+
+    // Build display options with availability indicators
+    let options: Vec<String> = all_components
+        .iter()
+        .map(|c| {
+            let path = c.source_path(paths);
+            let exists = path.exists();
+            let indicator = if exists { "✓" } else { "✗" };
+            let availability = if exists { "" } else { " (not found)" };
+            let tracked = if current_components.contains(c) {
+                " [tracked]"
+            } else {
+                ""
+            };
+            format!(
+                "{}{}{}{}",
+                indicator,
+                c.display_name(),
+                availability,
+                tracked
+            )
+        })
+        .collect();
+
+    // Default: select all currently tracked components
+    let defaults: Vec<usize> = all_components
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| current_components.contains(c))
+        .map(|(i, _)| i)
+        .collect();
+
+    let selected_indices = MultiSelect::new(
+        "Which components should this profile manage?",
+        options.clone(),
+    )
+    .with_default(&defaults)
+    .with_help_message(
+        "Space to select, Enter to confirm. Currently tracked components are pre-selected.",
+    )
+    .prompt()
+    .context("Component selection cancelled")?;
+
+    let selected: HashSet<Component> = selected_indices
+        .into_iter()
+        .filter_map(|selected_str| {
+            options
+                .iter()
+                .position(|opt| *opt == selected_str)
+                .map(|idx| all_components[idx])
+        })
+        .collect();
+
+    if selected.is_empty() {
+        bail!("At least one component must be selected");
+    }
+
+    Ok(selected)
 }
 
 /// Run diagnostics

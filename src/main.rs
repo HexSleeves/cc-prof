@@ -63,6 +63,11 @@ enum Commands {
     Edit {
         /// Name of the profile to edit
         name: String,
+
+        /// Components to track (comma-separated: settings,agents,hooks,commands)
+        /// Omit value for interactive mode
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
+        components: Option<Vec<String>>,
     },
 
     /// Run diagnostics on the ccprof setup
@@ -89,7 +94,13 @@ fn main() -> Result<()> {
             commands::add(&paths, &name, &ui, components)
         }
         Commands::Use { name } => commands::use_profile(&paths, &name, &ui),
-        Commands::Edit { name } => commands::edit(&paths, &name, &ui),
+        Commands::Edit { name, components } => {
+            if let Some(comps) = components {
+                commands::edit_components(&paths, &name, &ui, Some(comps))
+            } else {
+                commands::edit(&paths, &name, &ui)
+            }
+        }
         Commands::Doctor => commands::doctor(&paths, &ui),
     }
 }

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -177,6 +178,93 @@ pub fn validate_json_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Update the managed components of an existing profile
+/// Adds new components from source, removes components from profile
+pub fn update_profile_components(
+    paths: &Paths,
+    name: &str,
+    new_components: HashSet<Component>,
+) -> Result<()> {
+    validate_profile_name(name)?;
+
+    if !profile_exists(paths, name) {
+        bail!("Profile '{}' does not exist", name);
+    }
+
+    if new_components.is_empty() {
+        bail!("At least one component must be selected");
+    }
+
+    let profile_dir = paths.profile_dir(name);
+
+    // Read existing metadata
+    let mut metadata = ProfileMetadata::read(&profile_dir)?;
+
+    let old_components = metadata.managed_components.clone();
+
+    // Add new components that weren't in the old set
+    for component in &new_components {
+        if !old_components.contains(component) {
+            let source = component.source_path(paths);
+            let dest = component.profile_path(paths, name);
+
+            if !source.exists() {
+                bail!(
+                    "Component {} does not exist at {:?}\n\
+                     Hint: This component is not present in your ~/.claude/ directory.\n\
+                     You can either create it first, or deselect this component.",
+                    component.display_name(),
+                    source
+                );
+            }
+
+            if component.is_file() {
+                // Validate JSON for settings component
+                if matches!(component, Component::Settings) {
+                    validate_json_file(&source)?;
+                }
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+                }
+                fs::copy(&source, &dest)
+                    .with_context(|| format!("Failed to copy file: {:?} -> {:?}", source, dest))?;
+            } else {
+                // Copy directory recursively
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+                }
+                copy_dir_recursive(&source, &dest)
+                    .with_context(|| format!("Failed to copy directory: {:?} -> {:?}", source, dest))?;
+            }
+        }
+    }
+
+    // Remove components that are in old set but not in new set
+    for component in &old_components {
+        if !new_components.contains(component) {
+            let dest = component.profile_path(paths, name);
+            if dest.exists() {
+                if dest.is_file() {
+                    fs::remove_file(&dest)
+                        .with_context(|| format!("Failed to remove file: {:?}", dest))?;
+                } else if dest.is_dir() {
+                    fs::remove_dir_all(&dest)
+                        .with_context(|| format!("Failed to remove directory: {:?}", dest))?;
+                }
+            }
+        }
+    }
+
+    // Update metadata
+    metadata.managed_components = new_components;
+    metadata.updated_at = Utc::now();
+    metadata.write(&profile_dir)?;
+
+    Ok(())
+}
+
 /// Get validation result without failing (for doctor command)
 pub fn validate_json_file_result(path: &Path) -> ValidationResult {
     if !path.exists() {
@@ -316,5 +404,96 @@ mod tests {
             validate_json_file_result(&invalid_path),
             ValidationResult::Invalid(_)
         ));
+    }
+
+    #[test]
+    fn test_update_profile_components() {
+        use crate::components::Component;
+
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Create source files for all components
+        fs::create_dir_all(&paths.claude_dir).unwrap();
+        fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
+
+        // Create agents dir with a file
+        fs::create_dir_all(&paths.claude_agents).unwrap();
+        fs::write(paths.claude_agents.join("agent.md"), "# Agent").unwrap();
+
+        // Create hooks dir
+        fs::create_dir_all(&paths.claude_hooks).unwrap();
+
+        // Create commands dir
+        fs::create_dir_all(&paths.claude_commands).unwrap();
+
+        // Create initial profile with only settings
+        let mut initial_components = HashSet::new();
+        initial_components.insert(Component::Settings);
+        create_profile_with_components(&paths, "test", initial_components).unwrap();
+
+        // Verify profile exists with only settings
+        let profile_dir = paths.profile_dir("test");
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir).unwrap();
+        assert_eq!(metadata.managed_components.len(), 1);
+        assert!(metadata.managed_components.contains(&Component::Settings));
+        assert!(!metadata.managed_components.contains(&Component::Agents));
+
+        // Now update profile to include agents
+        let mut new_components = HashSet::new();
+        new_components.insert(Component::Settings);
+        new_components.insert(Component::Agents);
+        update_profile_components(&paths, "test", new_components).unwrap();
+
+        // Verify profile now has both settings and agents
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir).unwrap();
+        assert_eq!(metadata.managed_components.len(), 2);
+        assert!(metadata.managed_components.contains(&Component::Settings));
+        assert!(metadata.managed_components.contains(&Component::Agents));
+
+        // Verify agents file was copied
+        assert!(paths.profile_dir("test").join("agents/agent.md").exists());
+    }
+
+    #[test]
+    fn test_update_profile_components_remove() {
+        use crate::components::Component;
+
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Create source files
+        fs::create_dir_all(&paths.claude_dir).unwrap();
+        fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
+
+        fs::create_dir_all(&paths.claude_agents).unwrap();
+        fs::write(paths.claude_agents.join("agent.md"), "# Agent").unwrap();
+
+        // Create profile with settings and agents
+        let mut initial_components = HashSet::new();
+        initial_components.insert(Component::Settings);
+        initial_components.insert(Component::Agents);
+        create_profile_with_components(&paths, "test", initial_components).unwrap();
+
+        // Verify profile exists with both
+        let profile_dir = paths.profile_dir("test");
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir).unwrap();
+        assert_eq!(metadata.managed_components.len(), 2);
+
+        // Update profile to only have settings (remove agents)
+        let mut new_components = HashSet::new();
+        new_components.insert(Component::Settings);
+        update_profile_components(&paths, "test", new_components).unwrap();
+
+        // Verify profile now has only settings
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir).unwrap();
+        assert_eq!(metadata.managed_components.len(), 1);
+        assert!(metadata.managed_components.contains(&Component::Settings));
+        assert!(!metadata.managed_components.contains(&Component::Agents));
+
+        // Verify agents directory was removed
+        assert!(!paths.profile_dir("test").join("agents").exists());
     }
 }
