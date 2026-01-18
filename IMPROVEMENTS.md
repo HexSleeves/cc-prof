@@ -4,78 +4,78 @@ This document outlines prioritized improvements, optimizations, and enhancements
 
 ---
 
-## Phase 1: Critical Fixes (Priority: Immediate)
+## Phase 1: Critical Fixes (Priority: Immediate) ✅ COMPLETED
 
 These issues affect correctness, stability, or prevent building on stable Rust.
 
-### 1.2 Fix Unstable `let-chains` Syntax
+### 1.2 Fix Unstable `let-chains` Syntax ✅
 
 **File:** `src/profiles.rs:36-38`
 **Issue:** Using `if path.is_dir() && let Some(name) = ...` requires nightly Rust
 **Fix:** Refactor to nested `if` statements for stable Rust compatibility
-**Effort:** 15 min
+**Status:** DONE - Refactored to nested if statements with explanatory comment
 
-### 1.3 Fix Unsafe `set_var` in Tests
+### 1.3 Fix Unsafe `set_var` in Tests ✅
 
 **File:** `src/components.rs:195`
 **Issue:** `unsafe { std::env::set_var("HOME", home) }` is unsound in multi-threaded test environment
 **Fix:** Use test isolation pattern or `temp_env` crate
-**Effort:** 30 min
+**Status:** DONE - Removed unsafe set_var, tests now use `Paths` struct with temp directories
 
-### 1.4 Remove Duplicate `tempfile` Dependency
+### 1.4 Remove Duplicate `tempfile` Dependency ✅
 
 **File:** `Cargo.toml`
 **Issue:** `tempfile` listed in both `[dependencies]` and `[dev-dependencies]`
 **Fix:** Keep only in `[dev-dependencies]` (not used at runtime)
-**Effort:** 5 min
+**Status:** DONE - Now only in dev-dependencies
 
 ---
 
-## Phase 2: Code Quality & Cleanup (Priority: High)
+## Phase 2: Code Quality & Cleanup (Priority: High) ✅ COMPLETED
 
 Improve maintainability and reduce technical debt.
 
-### 2.1 Extract Duplicate Test Helpers
+### 2.1 Extract Duplicate Test Helpers ✅
 
 **Files:** `commands.rs`, `profiles.rs`, `switch.rs`, `doctor.rs`
 **Issue:** `setup_test_paths()` is copy-pasted across 4 modules
 **Fix:** Create `#[cfg(test)] pub mod test_utils` in `lib.rs` or `src/test_utils.rs`
-**Effort:** 1 hour
+**Status:** DONE - Created `src/test_utils.rs` with shared `setup_test_paths()` function
 
-### 2.2 Extract Nested Helper Functions
+### 2.2 Extract Nested Helper Functions ✅
 
 **Files:** `commands.rs:238-267`, `switch.rs:215-244`
 **Issue:** `dir_size()` and `copy_dir_recursive()` are nested functions that could be reused
 **Fix:** Move to a shared `fs_utils` module or into `paths.rs`
-**Effort:** 45 min
+**Status:** DONE - Created `src/fs_utils.rs` with `dir_size()` and `copy_dir_recursive()`
 
-### 2.3 Remove Deprecated Standalone Functions
+### 2.3 Remove Deprecated Standalone Functions ✅
 
 **File:** `src/ui.rs:338-359`
 **Issue:** `ok()`, `warn()`, `err()`, `dim()` are marked deprecated but still exported
 **Fix:** Either remove entirely or add proper `#[deprecated(since, note)]` attributes
-**Effort:** 20 min
+**Status:** N/A - No deprecated functions found in current codebase (already cleaned up)
 
-### 2.4 Fix Error Message Formatting
+### 2.4 Fix Error Message Formatting ✅
 
 **File:** `src/commands.rs:159-163`
 **Issue:** Uses `\\n\\` which produces literal characters instead of newlines
 **Fix:** Use proper escape sequences `\n`
-**Effort:** 10 min
+**Status:** DONE - All error messages now use proper `\n` escape sequences
 
-### 2.5 Clean Up cfg Attribute Suppression
+### 2.5 Clean Up cfg Attribute Suppression ✅
 
 **File:** `src/switch.rs:282-283`
 **Issue:** `#[cfg_attr(unix, allow(unused_variables))]` suppresses warnings instead of proper handling
 **Fix:** Use proper `#[cfg(unix)]` / `#[cfg(windows)]` conditional compilation
-**Effort:** 30 min
+**Status:** DONE - Now uses proper `#[cfg(unix)]` and `#[cfg(windows)]` conditional compilation
 
-### 2.6 Standardize Error Message Style
+### 2.6 Standardize Error Message Style ✅
 
 **Files:** Multiple
 **Issue:** Inconsistent error formats - some use hints, some don't
 **Fix:** Establish pattern: primary message + optional `\nHint: ...` for actionable items
-**Effort:** 1 hour
+**Status:** DONE - All user-facing errors now follow consistent pattern with helpful hints
 
 ---
 
@@ -377,9 +377,9 @@ Optional improvements for code elegance.
 
 These are low-effort, high-value improvements:
 
-- [ ] Fix Cargo.toml edition (5 min)
-- [ ] Remove duplicate tempfile dep (5 min)
-- [ ] Fix error message escaping (10 min)
+- [x] Fix Cargo.toml edition (5 min) - Using edition 2024 with Rust 1.92+
+- [x] Remove duplicate tempfile dep (5 min) - Now only in dev-dependencies
+- [x] Fix error message escaping (10 min) - All messages use proper `\n`
 - [ ] Add `#[must_use]` attributes (30 min)
 - [ ] Make `Component::ALL` const (15 min)
 - [ ] Add shell completions (1 hour)
@@ -406,9 +406,9 @@ These are low-effort, high-value improvements:
 
 ### v0.2.0 - Stability Release
 
-- All Phase 1 (Critical Fixes)
-- Phase 2 (Code Quality)
-- Phase 3 (Robustness)
+- All Phase 1 (Critical Fixes) ✅ COMPLETED
+- Phase 2 (Code Quality) ✅ COMPLETED
+- Phase 3 (Robustness) - IN PROGRESS
 
 ### v0.3.0 - Feature Complete
 

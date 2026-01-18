@@ -83,7 +83,8 @@ pub fn validate_profile_name(name: &str) -> Result<()> {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         bail!(
-            "Profile name can only contain letters, numbers, underscores, and hyphens.\nHint: '{}'  contains invalid characters",
+            "Profile name can only contain letters, numbers, underscores, and hyphens.\n\
+             Hint: '{}' contains invalid characters.",
             name
         );
     }
@@ -141,7 +142,10 @@ pub fn create_profile_with_components(
     }
 
     if components.is_empty() {
-        bail!("At least one component must be selected");
+        bail!(
+            "At least one component must be selected.\n\
+             Hint: Specify components with --components or select interactively."
+        );
     }
 
     // Create profile directory
@@ -210,7 +214,10 @@ pub fn update_profile_components(
     }
 
     if new_components.is_empty() {
-        bail!("At least one component must be selected");
+        bail!(
+            "At least one component must be selected.\n\
+             Hint: Specify components with --components or select interactively."
+        );
     }
 
     let profile_dir = paths.profile_dir(name);

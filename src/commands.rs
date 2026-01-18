@@ -313,7 +313,10 @@ pub fn select_components(paths: &Paths) -> Result<HashSet<Component>> {
         .collect();
 
     if selected.is_empty() {
-        bail!("At least one component must be selected");
+        bail!(
+            "At least one component must be selected.\n\
+             Hint: Use Space to toggle components, then press Enter to confirm."
+        );
     }
 
     Ok(selected)
@@ -469,7 +472,10 @@ pub fn edit_components(
             selected
         }
     } else {
-        bail!("No components specified");
+        bail!(
+            "No components specified.\n\
+             Hint: Use --components settings,agents,hooks,commands or run interactively."
+        );
     };
 
     // Update the profile components
@@ -545,7 +551,10 @@ fn edit_select_components(
         .collect();
 
     if selected.is_empty() {
-        bail!("At least one component must be selected");
+        bail!(
+            "At least one component must be selected.\n\
+             Hint: Use Space to toggle components, then press Enter to confirm."
+        );
     }
 
     Ok(selected)
