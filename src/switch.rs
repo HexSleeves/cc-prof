@@ -8,6 +8,9 @@ use crate::components::{Component, ProfileMetadata};
 use crate::paths::Paths;
 use crate::state::LockedState;
 
+/// Maximum number of backups to keep per component
+const MAX_BACKUPS: usize = 10;
+
 /// Information about the current settings file status
 #[derive(Debug, Clone)]
 pub enum SettingsStatus {
@@ -212,31 +215,56 @@ impl ComponentStatus {
 }
 
 /// Recursively copy a directory
-pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        bail!("Source directory does not exist: {:?}", src);
+// Re-export copy_dir_recursive from fs_utils for convenience
+pub use crate::fs_utils::copy_dir_recursive;
+
+/// Clean up old backups for a component, keeping only the most recent MAX_BACKUPS
+fn cleanup_old_backups(paths: &Paths, component: &Component) -> Result<()> {
+    let pattern = match component {
+        Component::Settings => "settings.json.",
+        Component::Agents => "agents.",
+        Component::Hooks => "hooks.",
+        Component::Commands => "commands.",
+    };
+
+    // Collect all backup files for this component
+    let entries = fs::read_dir(&paths.backups_dir)
+        .with_context(|| format!("Failed to read backups directory: {:?}", paths.backups_dir))?;
+
+    let mut backups: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let filename = path.file_name()?.to_str()?;
+
+            // Only include backups for this component
+            if filename.starts_with(pattern) && filename.ends_with(".bak") {
+                let metadata = fs::metadata(&path).ok()?;
+                let modified = metadata.modified().ok()?;
+                Some((path, modified))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // If we don't have too many backups, no need to clean up
+    if backups.len() <= MAX_BACKUPS {
+        return Ok(());
     }
 
-    if !src.is_dir() {
-        bail!("Source is not a directory: {:?}", src);
-    }
+    // Sort by modification time (oldest first)
+    backups.sort_by_key(|(_, time)| *time);
 
-    fs::create_dir_all(dst)
-        .with_context(|| format!("Failed to create destination directory: {:?}", dst))?;
-
-    for entry in
-        fs::read_dir(src).with_context(|| format!("Failed to read source directory: {:?}", src))?
-    {
-        let entry = entry.context("Failed to read directory entry")?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+    // Remove oldest backups to keep only MAX_BACKUPS
+    let to_remove = backups.len() - MAX_BACKUPS;
+    for (path, _) in backups.iter().take(to_remove) {
+        if path.is_dir() {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("Failed to remove old backup directory: {:?}", path))?;
         } else {
-            fs::copy(&src_path, &dst_path).with_context(|| {
-                format!("Failed to copy file: {:?} -> {:?}", src_path, dst_path)
-            })?;
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove old backup file: {:?}", path))?;
         }
     }
 
@@ -275,70 +303,69 @@ pub fn backup_component(paths: &Paths, component: &Component, source: &Path) -> 
         })?;
     }
 
+    // Clean up old backups to avoid unlimited accumulation
+    cleanup_old_backups(paths, component)?;
+
     Ok(())
 }
 
 /// Create a symlink for a component (file or directory)
-#[cfg_attr(unix, allow(unused_variables))]
 pub fn create_component_symlink(source: &Path, target: &Path, component: &Component) -> Result<()> {
     // Remove existing file/directory/symlink
     if source.exists() || fs::read_link(source).is_ok() {
-        if source.is_dir() {
+        // Use symlink_metadata to avoid following symlinks
+        let metadata = fs::symlink_metadata(source)
+            .with_context(|| format!("Failed to read metadata for: {:?}", source))?;
+
+        if metadata.is_symlink() {
+            // Symlinks (to files or directories) should be removed with remove_file
+            fs::remove_file(source)
+                .with_context(|| format!("Failed to remove symlink: {:?}", source))?;
+        } else if metadata.is_dir() {
+            // Regular directories need remove_dir_all
             fs::remove_dir_all(source)
                 .with_context(|| format!("Failed to remove existing directory: {:?}", source))?;
         } else {
+            // Regular files
             fs::remove_file(source)
                 .with_context(|| format!("Failed to remove existing file: {:?}", source))?;
         }
     }
 
-    // Create symlink (Unix for now, Windows support can be added later)
-    #[cfg(unix)]
-    {
-        symlink(target, source)
-            .with_context(|| format!("Failed to create symlink: {:?} -> {:?}", source, target))?;
-    }
+    // Create symlink - platform-specific implementation
+    create_symlink_platform(source, target, component)
+}
 
-    #[cfg(windows)]
-    {
-        if component.is_file() {
-            std::os::windows::fs::symlink_file(target, source).with_context(|| {
-                format!(
-                    "Failed to create file symlink: {:?} -> {:?}",
-                    source, target
-                )
-            })?;
-        } else {
-            std::os::windows::fs::symlink_dir(target, source).with_context(|| {
-                format!(
-                    "Failed to create directory symlink: {:?} -> {:?}",
-                    source, target
-                )
-            })?;
-        }
-    }
+#[cfg(unix)]
+fn create_symlink_platform(source: &Path, target: &Path, _component: &Component) -> Result<()> {
+    symlink(target, source)
+        .with_context(|| format!("Failed to create symlink: {:?} -> {:?}", source, target))
+}
 
-    Ok(())
+#[cfg(windows)]
+fn create_symlink_platform(source: &Path, target: &Path, component: &Component) -> Result<()> {
+    if component.is_file() {
+        std::os::windows::fs::symlink_file(target, source).with_context(|| {
+            format!(
+                "Failed to create file symlink: {:?} -> {:?}",
+                source, target
+            )
+        })
+    } else {
+        std::os::windows::fs::symlink_dir(target, source).with_context(|| {
+            format!(
+                "Failed to create directory symlink: {:?} -> {:?}",
+                source, target
+            )
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::setup_test_paths;
     use tempfile::TempDir;
-
-    fn setup_test_paths(temp_dir: &TempDir) -> Paths {
-        Paths {
-            base_dir: temp_dir.path().join(".claude-profiles"),
-            profiles_dir: temp_dir.path().join(".claude-profiles/profiles"),
-            backups_dir: temp_dir.path().join(".claude-profiles/backups"),
-            state_file: temp_dir.path().join(".claude-profiles/state.json"),
-            claude_dir: temp_dir.path().join(".claude"),
-            claude_settings: temp_dir.path().join(".claude/settings.json"),
-            claude_agents: temp_dir.path().join(".claude/agents"),
-            claude_hooks: temp_dir.path().join(".claude/hooks"),
-            claude_commands: temp_dir.path().join(".claude/commands"),
-        }
-    }
 
     #[test]
     fn test_settings_status_missing() {

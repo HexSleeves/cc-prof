@@ -33,15 +33,18 @@ pub fn list_profiles(paths: &Paths) -> Result<Vec<String>> {
             let settings_path = path.join("settings.json");
             let metadata_path = path.join("profile.json");
 
-            if settings_path.exists()
-                && let Some(name) = path.file_name().and_then(|n| n.to_str())
-            {
-                profiles.push(name.to_string());
+            // Note: Intentionally not using let-chains (if cond && let Some(x) = ...)
+            // to maintain stable Rust compatibility (let-chains requires nightly)
+            #[allow(clippy::collapsible_if)]
+            if settings_path.exists() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    profiles.push(name.to_string());
 
-                // Auto-migrate legacy profiles (silent)
-                if !metadata_path.exists() {
-                    // This is a legacy profile - create profile.json
-                    let _ = ProfileMetadata::migrate_legacy(&path);
+                    // Auto-migrate legacy profiles (silent)
+                    if !metadata_path.exists() {
+                        // This is a legacy profile - create profile.json
+                        let _ = ProfileMetadata::migrate_legacy(&path);
+                    }
                 }
             }
         }
@@ -58,21 +61,36 @@ pub fn profile_exists(paths: &Paths, name: &str) -> bool {
 }
 
 /// Validate that a profile name is acceptable
+///
+/// Profile names must:
+/// - Not be empty
+/// - Only contain alphanumeric characters, underscores, and hyphens: [a-zA-Z0-9_-]
+/// - Not start with a dot or hyphen
+///
+/// This strict validation prevents issues with:
+/// - Unicode characters and emojis
+/// - Special characters that may cause filesystem issues
+/// - Spaces and other whitespace
+/// - Path separators and other problematic characters
 pub fn validate_profile_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("Profile name cannot be empty");
     }
 
-    if name.contains('/') || name.contains('\\') || name.contains('\0') {
-        bail!("Profile name cannot contain path separators or null bytes");
+    // Check that all characters are alphanumeric, underscore, or hyphen
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        bail!(
+            "Profile name can only contain letters, numbers, underscores, and hyphens.\nHint: '{}'  contains invalid characters",
+            name
+        );
     }
 
-    if name.starts_with('.') {
-        bail!("Profile name cannot start with a dot");
-    }
-
-    if name == "." || name == ".." {
-        bail!("Invalid profile name");
+    // Don't allow names starting with dot or hyphen
+    if name.starts_with('.') || name.starts_with('-') {
+        bail!("Profile name cannot start with a dot or hyphen");
     }
 
     Ok(())
@@ -235,8 +253,9 @@ pub fn update_profile_components(
                     fs::create_dir_all(parent)
                         .with_context(|| format!("Failed to create directory: {:?}", parent))?;
                 }
-                copy_dir_recursive(&source, &dest)
-                    .with_context(|| format!("Failed to copy directory: {:?} -> {:?}", source, dest))?;
+                copy_dir_recursive(&source, &dest).with_context(|| {
+                    format!("Failed to copy directory: {:?} -> {:?}", source, dest)
+                })?;
             }
         }
     }
@@ -300,33 +319,39 @@ impl std::fmt::Display for ValidationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::setup_test_paths;
     use tempfile::TempDir;
-
-    fn setup_test_paths(temp_dir: &TempDir) -> Paths {
-        Paths {
-            base_dir: temp_dir.path().join(".claude-profiles"),
-            profiles_dir: temp_dir.path().join(".claude-profiles/profiles"),
-            backups_dir: temp_dir.path().join(".claude-profiles/backups"),
-            state_file: temp_dir.path().join(".claude-profiles/state.json"),
-            claude_dir: temp_dir.path().join(".claude"),
-            claude_settings: temp_dir.path().join(".claude/settings.json"),
-            claude_agents: temp_dir.path().join(".claude/agents"),
-            claude_hooks: temp_dir.path().join(".claude/hooks"),
-            claude_commands: temp_dir.path().join(".claude/commands"),
-        }
-    }
 
     #[test]
     fn test_validate_profile_name() {
+        // Valid names
         assert!(validate_profile_name("work").is_ok());
         assert!(validate_profile_name("my-profile").is_ok());
         assert!(validate_profile_name("profile_1").is_ok());
+        assert!(validate_profile_name("Profile_Name_123").is_ok());
 
+        // Invalid: empty
         assert!(validate_profile_name("").is_err());
+
+        // Invalid: path separators
         assert!(validate_profile_name("path/with/slash").is_err());
+        assert!(validate_profile_name("path\\with\\backslash").is_err());
+
+        // Invalid: starts with dot or hyphen
         assert!(validate_profile_name(".hidden").is_err());
         assert!(validate_profile_name(".").is_err());
         assert!(validate_profile_name("..").is_err());
+        assert!(validate_profile_name("-invalid").is_err());
+
+        // Invalid: special characters
+        assert!(validate_profile_name("profile name").is_err()); // space
+        assert!(validate_profile_name("profile@name").is_err());
+        assert!(validate_profile_name("profile!name").is_err());
+        assert!(validate_profile_name("profile$name").is_err());
+
+        // Invalid: unicode and emojis
+        assert!(validate_profile_name("profile🚀").is_err());
+        assert!(validate_profile_name("プロフィール").is_err());
     }
 
     #[test]

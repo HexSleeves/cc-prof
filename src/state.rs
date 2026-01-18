@@ -32,7 +32,10 @@ impl State {
             .with_context(|| format!("Failed to parse state file: {:?}", path))
     }
 
-    /// Write state to file (without locking - use write_locked for concurrent safety)
+    /// Write state to file atomically (without locking - use write_locked for concurrent safety)
+    ///
+    /// Uses atomic write pattern: write to temp file, then rename.
+    /// This ensures the state file is never corrupted even if the process crashes.
     pub fn write(&self, path: &Path) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -42,8 +45,13 @@ impl State {
 
         let content = serde_json::to_string_pretty(self).context("Failed to serialize state")?;
 
-        std::fs::write(path, content)
-            .with_context(|| format!("Failed to write state file: {:?}", path))
+        // Atomic write: write to temp file, then rename
+        let temp_path = path.with_extension("json.tmp");
+        std::fs::write(&temp_path, &content)
+            .with_context(|| format!("Failed to write temp state file: {:?}", temp_path))?;
+
+        std::fs::rename(&temp_path, path)
+            .with_context(|| format!("Failed to rename state file: {:?} -> {:?}", temp_path, path))
     }
 }
 

@@ -186,15 +186,13 @@ impl ProfileMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::setup_test_paths;
     use tempfile::TempDir;
 
     #[test]
     fn test_component_paths() {
         let temp = TempDir::new().unwrap();
-        let home = temp.path();
-        unsafe { std::env::set_var("HOME", home) };
-
-        let paths = Paths::new().unwrap();
+        let paths = setup_test_paths(&temp);
 
         // Test source paths
         assert!(paths.claude_settings.ends_with("settings.json"));

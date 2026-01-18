@@ -330,35 +330,6 @@ impl Ui {
 }
 
 // -----------------------------------------------------------------------------
-// Legacy compatibility functions (standalone, uses default Ui)
-// These are deprecated - prefer using Ui instance methods
-// -----------------------------------------------------------------------------
-
-/// Print OK label (green) with message - DEPRECATED, use Ui::ok()
-pub fn ok(msg: impl AsRef<str>) {
-    let ui = Ui::default();
-    ui.ok(msg);
-}
-
-/// Print WARN label (yellow) with message - DEPRECATED, use Ui::warn()
-pub fn warn(msg: impl AsRef<str>) {
-    let ui = Ui::default();
-    ui.warn(msg);
-}
-
-/// Print ERROR label (red) with message to stderr - DEPRECATED, use Ui::err()
-pub fn err(msg: impl AsRef<str>) {
-    let ui = Ui::default();
-    ui.err(msg);
-}
-
-/// Return a dimmed string - DEPRECATED, use Ui::dim()
-pub fn dim(s: impl AsRef<str>) -> String {
-    let ui = Ui::default();
-    ui.dim(s)
-}
-
-// -----------------------------------------------------------------------------
 // Helper: convert anstyle::AnsiColor to comfy_table::Color
 // -----------------------------------------------------------------------------
 

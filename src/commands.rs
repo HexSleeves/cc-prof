@@ -157,7 +157,7 @@ pub fn current(paths: &Paths, ui: &Ui) -> Result<()> {
 pub fn inspect(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\\n\\\n             Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -243,21 +243,7 @@ fn calculate_size(path: &Path) -> Result<String> {
             .with_context(|| format!("Failed to read metadata for {}", path.display()))?
             .len()
     } else if path.is_dir() {
-        // Recursively calculate directory size
-        fn dir_size(path: &Path) -> std::io::Result<u64> {
-            let mut total = 0;
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                let metadata = entry.metadata()?;
-                if metadata.is_file() {
-                    total += metadata.len();
-                } else if metadata.is_dir() {
-                    total += dir_size(&entry.path())?;
-                }
-            }
-            Ok(total)
-        }
-        dir_size(path)
+        crate::fs_utils::dir_size(path)
             .with_context(|| format!("Failed to calculate size for {}", path.display()))?
     } else {
         0
@@ -339,8 +325,7 @@ pub fn add(paths: &Paths, name: &str, ui: &Ui, components_arg: Option<Vec<String
 
     if profile_exists(paths, name) {
         bail!(
-            "Profile '{}' already exists.\n\
-             Use 'ccprof edit {}' to modify it, or choose a different name.",
+            "Profile '{}' already exists.\nHint: Use 'ccprof edit {}' to modify it, or choose a different name.",
             name,
             name
         );
@@ -357,8 +342,7 @@ pub fn add(paths: &Paths, name: &str, ui: &Ui, components_arg: Option<Vec<String
                 }
                 Err(_) => {
                     bail!(
-                        "Invalid component name: '{}'\n\
-                         Valid components: settings, agents, hooks, commands",
+                        "Invalid component name: '{}'\nHint: Valid components are settings, agents, hooks, commands",
                         comp_name
                     );
                 }
@@ -409,8 +393,7 @@ pub fn use_profile(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
 pub fn edit(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -453,8 +436,7 @@ pub fn edit_components(
 ) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -578,23 +560,10 @@ pub fn doctor(paths: &Paths, ui: &Ui) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::setup_test_paths;
     use crate::ui::ColorMode;
     use std::fs;
     use tempfile::TempDir;
-
-    fn setup_test_paths(temp_dir: &TempDir) -> Paths {
-        Paths {
-            base_dir: temp_dir.path().join(".claude-profiles"),
-            profiles_dir: temp_dir.path().join(".claude-profiles/profiles"),
-            backups_dir: temp_dir.path().join(".claude-profiles/backups"),
-            state_file: temp_dir.path().join(".claude-profiles/state.json"),
-            claude_dir: temp_dir.path().join(".claude"),
-            claude_settings: temp_dir.path().join(".claude/settings.json"),
-            claude_agents: temp_dir.path().join(".claude/agents"),
-            claude_hooks: temp_dir.path().join(".claude/hooks"),
-            claude_commands: temp_dir.path().join(".claude/commands"),
-        }
-    }
 
     fn test_ui() -> Ui {
         Ui::new(ColorMode::Never, false)
