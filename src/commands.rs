@@ -430,6 +430,138 @@ pub fn edit(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
     Ok(())
 }
 
+/// Edit a specific component of a profile
+pub fn edit_component(paths: &Paths, name: &str, component: &str, ui: &Ui) -> Result<()> {
+    if !profile_exists(paths, name) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            name
+        );
+    }
+
+    // Parse component
+    let comp: Component = component.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid component: '{}'\n\
+             Hint: Valid components are settings, agents, hooks, commands",
+            component
+        )
+    })?;
+
+    let component_path = comp.profile_path(paths, name);
+
+    if !component_path.exists() {
+        bail!(
+            "Component '{}' not found in profile '{}'.\n\
+             Hint: This profile may not include this component.",
+            component,
+            name
+        );
+    }
+
+    // Open in editor
+    open_in_editor(&component_path)?;
+    ui.ok(format!("Opened {} in editor", component_path.display()));
+    Ok(())
+}
+
+/// Edit all managed components of a profile
+pub fn edit_all_components(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
+    if !profile_exists(paths, name) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            name
+        );
+    }
+
+    let profile_dir = paths.profile_dir(name);
+    let metadata = crate::components::ProfileMetadata::read(&profile_dir)?;
+
+    if metadata.managed_components.is_empty() {
+        bail!(
+            "Profile '{}' has no managed components.\n\
+             Hint: Use 'ccprof edit {} --track' to add components.",
+            name,
+            name
+        );
+    }
+
+    // Collect paths to open
+    let mut paths_to_open: Vec<std::path::PathBuf> = Vec::new();
+    for comp in &metadata.managed_components {
+        let path = comp.profile_path(paths, name);
+        if path.exists() {
+            paths_to_open.push(path);
+        }
+    }
+
+    if paths_to_open.is_empty() {
+        bail!("No component files found for profile '{}'", name);
+    }
+
+    // Open all in editor
+    open_multiple_in_editor(&paths_to_open)?;
+    ui.ok(format!(
+        "Opened {} component(s) in editor",
+        paths_to_open.len()
+    ));
+    Ok(())
+}
+
+/// Open a file in the user's editor
+fn open_in_editor(path: &std::path::Path) -> Result<()> {
+    if let Ok(editor) = std::env::var("EDITOR") {
+        let status = Command::new(&editor)
+            .arg(path)
+            .status()
+            .with_context(|| format!("Failed to run editor: {}", editor))?;
+
+        if !status.success() {
+            bail!("Editor exited with non-zero status");
+        }
+    } else {
+        // Fallback to macOS 'open -t'
+        let status = Command::new("open")
+            .arg("-t")
+            .arg(path)
+            .status()
+            .context("Failed to run 'open -t'")?;
+
+        if !status.success() {
+            bail!("'open -t' exited with non-zero status");
+        }
+    }
+    Ok(())
+}
+
+/// Open multiple files in the user's editor
+fn open_multiple_in_editor(paths: &[std::path::PathBuf]) -> Result<()> {
+    if let Ok(editor) = std::env::var("EDITOR") {
+        let status = Command::new(&editor)
+            .args(paths)
+            .status()
+            .with_context(|| format!("Failed to run editor: {}", editor))?;
+
+        if !status.success() {
+            bail!("Editor exited with non-zero status");
+        }
+    } else {
+        // Fallback to macOS 'open -t' with multiple files
+        let status = Command::new("open")
+            .arg("-t")
+            .args(paths)
+            .status()
+            .context("Failed to run 'open -t'")?;
+
+        if !status.success() {
+            bail!("'open -t' exited with non-zero status");
+        }
+    }
+    Ok(())
+}
+
 /// Edit a profile's tracked components
 pub fn edit_components(
     paths: &Paths,
@@ -563,6 +695,602 @@ fn edit_select_components(
 /// Run diagnostics
 pub fn doctor(paths: &Paths, ui: &Ui) -> Result<()> {
     run_doctor(paths, ui);
+    Ok(())
+}
+
+/// List all backups
+pub fn backup_list(paths: &Paths, ui: &Ui) -> Result<()> {
+    if !paths.backups_dir.exists() {
+        ui.warn("No backups found.");
+        ui.newline();
+        ui.println("Backups are created automatically when switching profiles.");
+        return Ok(());
+    }
+
+    let entries: Vec<_> = std::fs::read_dir(&paths.backups_dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".bak")))
+        .collect();
+
+    if entries.is_empty() {
+        ui.warn("No backups found.");
+        return Ok(());
+    }
+
+    // Parse and sort backups by timestamp
+    let mut backups: Vec<_> = entries
+        .iter()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let metadata = e.metadata().ok()?;
+            let modified = metadata.modified().ok()?;
+            let size = if metadata.is_file() {
+                metadata.len()
+            } else {
+                crate::fs_utils::dir_size(&e.path()).unwrap_or(0)
+            };
+            Some((name, modified, size, e.path()))
+        })
+        .collect();
+
+    backups.sort_by(|a, b| b.1.cmp(&a.1)); // Most recent first
+
+    ui.section("Backups");
+    ui.newline();
+
+    let mut table = ui.table();
+    table.set_header(vec![
+        ui.header_cell("ID"),
+        ui.header_cell("Component"),
+        ui.header_cell("Date"),
+        ui.header_cell("Size"),
+    ]);
+
+    for (name, modified, size, _path) in &backups {
+        // Parse component from name (e.g., "settings.json.20240115_103045.bak")
+        let component = if name.starts_with("settings.json.") {
+            "Settings"
+        } else if name.starts_with("agents.") {
+            "Agents"
+        } else if name.starts_with("hooks.") {
+            "Hooks"
+        } else if name.starts_with("commands.") {
+            "Commands"
+        } else {
+            "Unknown"
+        };
+
+        // Format date
+        let datetime: chrono::DateTime<chrono::Utc> = (*modified).into();
+        let date_str = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        table.add_row(vec![
+            ui.cell(name),
+            ui.cell(component),
+            ui.cell(date_str),
+            ui.cell(format_bytes(*size)),
+        ]);
+    }
+
+    ui.println(table.to_string());
+    ui.newline();
+    ui.info(format!("{} backup(s) found", backups.len()));
+
+    Ok(())
+}
+
+/// Restore a backup
+pub fn backup_restore(paths: &Paths, id: &str, ui: &Ui) -> Result<()> {
+    let backup_path = paths.backups_dir.join(id);
+
+    if !backup_path.exists() {
+        bail!(
+            "Backup '{}' not found.\n\
+             Hint: Use 'ccprof backup list' to see available backups.",
+            id
+        );
+    }
+
+    // Determine component from backup name
+    let component = if id.starts_with("settings.json.") {
+        Component::Settings
+    } else if id.starts_with("agents.") {
+        Component::Agents
+    } else if id.starts_with("hooks.") {
+        Component::Hooks
+    } else if id.starts_with("commands.") {
+        Component::Commands
+    } else {
+        bail!(
+            "Cannot determine component type from backup name: {}\n\
+             Hint: Backup names should start with 'settings.json.', 'agents.', etc.",
+            id
+        );
+    };
+
+    // Confirm restore
+    let target = component.source_path(paths);
+    let confirm = inquire::Confirm::new(&format!("Restore '{}' to {}?", id, target.display()))
+        .with_default(false)
+        .with_help_message("This will overwrite the current file/directory")
+        .prompt()
+        .context("Confirmation cancelled")?;
+
+    if !confirm {
+        ui.warn("Restore cancelled.");
+        return Ok(());
+    }
+
+    // Remove current target if it exists
+    if target.exists() || std::fs::read_link(&target).is_ok() {
+        if target.is_dir() && !target.is_symlink() {
+            std::fs::remove_dir_all(&target)
+                .with_context(|| format!("Failed to remove {}", target.display()))?;
+        } else {
+            std::fs::remove_file(&target)
+                .with_context(|| format!("Failed to remove {}", target.display()))?;
+        }
+    }
+
+    // Copy backup to target
+    if backup_path.is_dir() {
+        crate::fs_utils::copy_dir_recursive(&backup_path, &target)?;
+    } else {
+        std::fs::copy(&backup_path, &target)
+            .with_context(|| format!("Failed to copy backup to {}", target.display()))?;
+    }
+
+    ui.ok(format!("Restored '{}' to {}", id, target.display()));
+    Ok(())
+}
+
+/// Clean old backups
+pub fn backup_clean(paths: &Paths, keep: usize, ui: &Ui) -> Result<()> {
+    if !paths.backups_dir.exists() {
+        ui.warn("No backups directory found.");
+        return Ok(());
+    }
+
+    let mut removed = 0;
+
+    // Clean each component type separately
+    for prefix in ["settings.json.", "agents.", "hooks.", "commands."] {
+        let mut backups: Vec<_> = std::fs::read_dir(&paths.backups_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".bak"))
+            })
+            .filter_map(|e| {
+                let modified = e.metadata().ok()?.modified().ok()?;
+                Some((e.path(), modified))
+            })
+            .collect();
+
+        if backups.len() <= keep {
+            continue;
+        }
+
+        // Sort by date (oldest first)
+        backups.sort_by_key(|(_, time)| *time);
+
+        // Remove oldest backups
+        let to_remove = backups.len() - keep;
+        for (path, _) in backups.iter().take(to_remove) {
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
+            removed += 1;
+        }
+    }
+
+    if removed > 0 {
+        ui.ok(format!(
+            "Removed {} old backup(s), keeping {} per component",
+            removed, keep
+        ));
+    } else {
+        ui.ok(format!(
+            "No backups to clean (keeping {} per component)",
+            keep
+        ));
+    }
+
+    Ok(())
+}
+
+/// Remove a profile
+pub fn remove(paths: &Paths, name: &str, ui: &Ui, force: bool) -> Result<()> {
+    if !profile_exists(paths, name) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            name
+        );
+    }
+
+    // Check if this is the active profile
+    let state = State::read(&paths.state_file).unwrap_or_default();
+    let is_active = state.default_profile.as_deref() == Some(name);
+
+    if is_active {
+        bail!(
+            "Cannot remove '{}' because it is the currently active profile.\n\
+             Hint: Switch to another profile first with 'ccprof use <other-profile>'.",
+            name
+        );
+    }
+
+    // Confirm unless --force
+    if !force {
+        let confirm = inquire::Confirm::new(&format!(
+            "Are you sure you want to remove profile '{}'?",
+            name
+        ))
+        .with_default(false)
+        .with_help_message("This will permanently delete the profile and all its settings")
+        .prompt()
+        .context("Confirmation cancelled")?;
+
+        if !confirm {
+            ui.warn("Removal cancelled.");
+            return Ok(());
+        }
+    }
+
+    // Remove the profile
+    crate::profiles::remove_profile(paths, name)?;
+
+    ui.ok(format!("Removed profile '{}'", name));
+    Ok(())
+}
+
+/// Compare two profiles
+pub fn diff(paths: &Paths, profile1: &str, profile2: &str, component: &str, ui: &Ui) -> Result<()> {
+    // Validate both profiles exist
+    if !profile_exists(paths, profile1) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            profile1
+        );
+    }
+    if !profile_exists(paths, profile2) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            profile2
+        );
+    }
+
+    // Parse component
+    let comp: Component = component.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid component: '{}'\n\
+             Hint: Valid components are settings, agents, hooks, commands",
+            component
+        )
+    })?;
+
+    // Get paths to the component in each profile
+    let path1 = comp.profile_path(paths, profile1);
+    let path2 = comp.profile_path(paths, profile2);
+
+    // Check if component exists in both profiles
+    if !path1.exists() {
+        bail!(
+            "Component '{}' not found in profile '{}'.\n\
+             Hint: This profile may not include this component.",
+            component,
+            profile1
+        );
+    }
+    if !path2.exists() {
+        bail!(
+            "Component '{}' not found in profile '{}'.\n\
+             Hint: This profile may not include this component.",
+            component,
+            profile2
+        );
+    }
+
+    ui.section(format!(
+        "Comparing {} between '{}' and '{}'",
+        comp.display_name(),
+        profile1,
+        profile2
+    ));
+    ui.newline();
+
+    if comp.is_file() {
+        // Compare JSON files
+        diff_json_files(&path1, &path2, profile1, profile2, ui)?;
+    } else {
+        // Compare directories
+        diff_directories(&path1, &path2, profile1, profile2, ui)?;
+    }
+
+    Ok(())
+}
+
+/// Compare two JSON files and display differences
+fn diff_json_files(
+    path1: &std::path::Path,
+    path2: &std::path::Path,
+    name1: &str,
+    name2: &str,
+    ui: &Ui,
+) -> Result<()> {
+    let content1 = std::fs::read_to_string(path1)
+        .with_context(|| format!("Failed to read {}", path1.display()))?;
+    let content2 = std::fs::read_to_string(path2)
+        .with_context(|| format!("Failed to read {}", path2.display()))?;
+
+    let json1: serde_json::Value = serde_json::from_str(&content1)
+        .with_context(|| format!("Failed to parse JSON from {}", path1.display()))?;
+    let json2: serde_json::Value = serde_json::from_str(&content2)
+        .with_context(|| format!("Failed to parse JSON from {}", path2.display()))?;
+
+    if json1 == json2 {
+        ui.ok("Files are identical");
+        return Ok(());
+    }
+
+    // Find differences
+    let mut differences = Vec::new();
+    compare_json_values(&json1, &json2, "", &mut differences);
+
+    if differences.is_empty() {
+        ui.ok("Files are identical");
+        return Ok(());
+    }
+
+    // Display differences
+    let mut table = ui.table();
+    table.set_header(vec![
+        ui.header_cell("Key"),
+        ui.header_cell(name1),
+        ui.header_cell(name2),
+    ]);
+
+    for (key, val1, val2) in &differences {
+        table.add_row(vec![
+            ui.cell(key),
+            ui.cell(format_json_value(val1)),
+            ui.cell(format_json_value(val2)),
+        ]);
+    }
+
+    ui.println(table.to_string());
+    ui.newline();
+    ui.info(format!("{} difference(s) found", differences.len()));
+
+    Ok(())
+}
+
+/// Recursively compare JSON values and collect differences
+fn compare_json_values(
+    v1: &serde_json::Value,
+    v2: &serde_json::Value,
+    path: &str,
+    differences: &mut Vec<(String, Option<serde_json::Value>, Option<serde_json::Value>)>,
+) {
+    use serde_json::Value;
+
+    match (v1, v2) {
+        (Value::Object(o1), Value::Object(o2)) => {
+            // Check keys in o1
+            for (key, val1) in o1 {
+                let new_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", path, key)
+                };
+
+                match o2.get(key) {
+                    Some(val2) => {
+                        compare_json_values(val1, val2, &new_path, differences);
+                    }
+                    None => {
+                        differences.push((new_path, Some(val1.clone()), None));
+                    }
+                }
+            }
+            // Check keys only in o2
+            for (key, val2) in o2 {
+                if !o1.contains_key(key) {
+                    let new_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{}.{}", path, key)
+                    };
+                    differences.push((new_path, None, Some(val2.clone())));
+                }
+            }
+        }
+        (Value::Array(a1), Value::Array(a2)) => {
+            if a1 != a2 {
+                differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
+            }
+        }
+        _ => {
+            if v1 != v2 {
+                differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
+            }
+        }
+    }
+}
+
+/// Format a JSON value for display (truncate if too long)
+fn format_json_value(val: &Option<serde_json::Value>) -> String {
+    match val {
+        None => "(missing)".to_string(),
+        Some(v) => {
+            let s = match v {
+                serde_json::Value::String(s) => format!("\"{}\"", s),
+                serde_json::Value::Array(arr) => format!("[{} items]", arr.len()),
+                serde_json::Value::Object(obj) => format!("{{...}} ({} keys)", obj.len()),
+                other => other.to_string(),
+            };
+            if s.len() > 50 {
+                format!("{}...", &s[..47])
+            } else {
+                s
+            }
+        }
+    }
+}
+
+/// Compare two directories and list differences
+fn diff_directories(
+    path1: &std::path::Path,
+    path2: &std::path::Path,
+    name1: &str,
+    name2: &str,
+    ui: &Ui,
+) -> Result<()> {
+    use std::collections::HashSet;
+
+    let files1: HashSet<String> = std::fs::read_dir(path1)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+
+    let files2: HashSet<String> = std::fs::read_dir(path2)?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+
+    let only_in_1: Vec<_> = files1.difference(&files2).collect();
+    let only_in_2: Vec<_> = files2.difference(&files1).collect();
+    let in_both: Vec<_> = files1.intersection(&files2).collect();
+
+    let mut has_diff = false;
+
+    if !only_in_1.is_empty() {
+        has_diff = true;
+        ui.println(format!("Only in '{}':", name1));
+        for f in &only_in_1 {
+            ui.println(format!("  - {}", f));
+        }
+        ui.newline();
+    }
+
+    if !only_in_2.is_empty() {
+        has_diff = true;
+        ui.println(format!("Only in '{}':", name2));
+        for f in &only_in_2 {
+            ui.println(format!("  + {}", f));
+        }
+        ui.newline();
+    }
+
+    // Check content differences for files in both
+    let mut content_diffs = Vec::new();
+    for file in &in_both {
+        let p1 = path1.join(file);
+        let p2 = path2.join(file);
+
+        if p1.is_file() && p2.is_file() {
+            let c1 = std::fs::read(&p1).unwrap_or_default();
+            let c2 = std::fs::read(&p2).unwrap_or_default();
+            if c1 != c2 {
+                content_diffs.push(file.as_str());
+            }
+        }
+    }
+
+    if !content_diffs.is_empty() {
+        has_diff = true;
+        ui.println("Files with different content:");
+        for f in &content_diffs {
+            ui.println(format!("  ~ {}", f));
+        }
+        ui.newline();
+    }
+
+    if !has_diff {
+        ui.ok("Directories are identical");
+    } else {
+        ui.info(format!(
+            "{} only in {}, {} only in {}, {} different",
+            only_in_1.len(),
+            name1,
+            only_in_2.len(),
+            name2,
+            content_diffs.len()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Rename a profile
+pub fn rename(paths: &Paths, old_name: &str, new_name: &str, ui: &Ui) -> Result<()> {
+    if !profile_exists(paths, old_name) {
+        bail!(
+            "Profile '{}' does not exist.\n\
+             Hint: Use 'ccprof list' to see available profiles.",
+            old_name
+        );
+    }
+
+    if profile_exists(paths, new_name) {
+        bail!(
+            "Profile '{}' already exists.\n\
+             Hint: Choose a different name or remove the existing profile first.",
+            new_name
+        );
+    }
+
+    // Validate new name
+    crate::profiles::validate_profile_name(new_name)?;
+
+    // Check if this is the active profile
+    let state = State::read(&paths.state_file).unwrap_or_default();
+    let is_active = state.default_profile.as_deref() == Some(old_name);
+
+    // Rename the profile directory
+    crate::profiles::rename_profile(paths, old_name, new_name)?;
+
+    // Update state if it was the active profile
+    if is_active {
+        use crate::state::LockedState;
+        let mut locked = LockedState::lock(&paths.state_file)?;
+        locked.update(|s| {
+            s.default_profile = Some(new_name.to_string());
+        })?;
+
+        // Update symlinks to point to new location
+        let profile_dir = paths.profile_dir(new_name);
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir)?;
+
+        for component in &metadata.managed_components {
+            let source = component.source_path(paths);
+            let target = component.profile_path(paths, new_name);
+
+            // Only update if it's already a symlink pointing to our profiles
+            if let Ok(current_target) = std::fs::read_link(&source)
+                && (paths.is_in_profiles_dir(&current_target)
+                    || paths.is_in_profiles_dir(
+                        &source.parent().unwrap_or(&source).join(&current_target),
+                    ))
+            {
+                crate::switch::create_component_symlink(&source, &target, component)?;
+            }
+        }
+
+        ui.ok(format!(
+            "Renamed profile '{}' to '{}' (symlinks updated)",
+            old_name, new_name
+        ));
+    } else {
+        ui.ok(format!("Renamed profile '{}' to '{}'", old_name, new_name));
+    }
+
     Ok(())
 }
 

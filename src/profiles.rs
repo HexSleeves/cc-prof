@@ -323,6 +323,60 @@ impl std::fmt::Display for ValidationResult {
     }
 }
 
+/// Remove a profile completely
+///
+/// This deletes the profile directory and all its contents.
+/// The caller should verify the profile is not active before calling this.
+pub fn remove_profile(paths: &Paths, name: &str) -> Result<()> {
+    let profile_dir = paths.profile_dir(name);
+
+    if !profile_dir.exists() {
+        bail!("Profile '{}' does not exist", name);
+    }
+
+    fs::remove_dir_all(&profile_dir)
+        .with_context(|| format!("Failed to remove profile directory: {:?}", profile_dir))?;
+
+    Ok(())
+}
+
+/// Rename a profile by moving its directory
+///
+/// This only renames the directory. The caller is responsible for:
+/// - Validating the new name
+/// - Updating state.json if this was the active profile
+/// - Updating symlinks if needed
+pub fn rename_profile(paths: &Paths, old_name: &str, new_name: &str) -> Result<()> {
+    let old_dir = paths.profile_dir(old_name);
+    let new_dir = paths.profile_dir(new_name);
+
+    if !old_dir.exists() {
+        bail!("Profile '{}' does not exist", old_name);
+    }
+
+    if new_dir.exists() {
+        bail!("Profile '{}' already exists", new_name);
+    }
+
+    fs::rename(&old_dir, &new_dir).with_context(|| {
+        format!(
+            "Failed to rename profile directory: {:?} -> {:?}",
+            old_dir, new_dir
+        )
+    })?;
+
+    // Update the profile metadata to reflect the new name
+    let metadata_path = new_dir.join("profile.json");
+    if metadata_path.exists() {
+        let mut metadata = crate::components::ProfileMetadata::read(&new_dir)?;
+        metadata.name = new_name.to_string();
+        metadata.updated_at = Utc::now();
+        metadata.write(&new_dir)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +581,92 @@ mod tests {
 
         // Verify agents directory was removed
         assert!(!paths.profile_dir("test").join("agents").exists());
+    }
+
+    #[test]
+    fn test_remove_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Create source files
+        fs::create_dir_all(&paths.claude_dir).unwrap();
+        fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
+
+        // Create a profile
+        let mut components = HashSet::new();
+        components.insert(Component::Settings);
+        create_profile_with_components(&paths, "to-remove", components).unwrap();
+
+        // Verify it exists
+        assert!(profile_exists(&paths, "to-remove"));
+
+        // Remove it
+        remove_profile(&paths, "to-remove").unwrap();
+
+        // Verify it's gone
+        assert!(!profile_exists(&paths, "to-remove"));
+    }
+
+    #[test]
+    fn test_remove_nonexistent_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Try to remove a profile that doesn't exist
+        assert!(remove_profile(&paths, "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_rename_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Create source files
+        fs::create_dir_all(&paths.claude_dir).unwrap();
+        fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
+
+        // Create a profile
+        let mut components = HashSet::new();
+        components.insert(Component::Settings);
+        create_profile_with_components(&paths, "old-name", components).unwrap();
+
+        // Verify it exists with old name
+        assert!(profile_exists(&paths, "old-name"));
+        assert!(!profile_exists(&paths, "new-name"));
+
+        // Rename it
+        rename_profile(&paths, "old-name", "new-name").unwrap();
+
+        // Verify it exists with new name only
+        assert!(!profile_exists(&paths, "old-name"));
+        assert!(profile_exists(&paths, "new-name"));
+
+        // Verify metadata was updated
+        let profile_dir = paths.profile_dir("new-name");
+        let metadata = crate::components::ProfileMetadata::read(&profile_dir).unwrap();
+        assert_eq!(metadata.name, "new-name");
+    }
+
+    #[test]
+    fn test_rename_to_existing_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let paths = setup_test_paths(&temp_dir);
+        paths.ensure_dirs().unwrap();
+
+        // Create source files
+        fs::create_dir_all(&paths.claude_dir).unwrap();
+        fs::write(&paths.claude_settings, r#"{"test": true}"#).unwrap();
+
+        // Create two profiles
+        let mut components = HashSet::new();
+        components.insert(Component::Settings);
+        create_profile_with_components(&paths, "profile-a", components.clone()).unwrap();
+        create_profile_with_components(&paths, "profile-b", components).unwrap();
+
+        // Try to rename a to b (should fail)
+        assert!(rename_profile(&paths, "profile-a", "profile-b").is_err());
     }
 }
