@@ -18,8 +18,5 @@ pub fn setup_test_paths(temp_dir: &TempDir) -> Paths {
         state_file: temp_dir.path().join(".claude-profiles/state.json"),
         claude_dir: temp_dir.path().join(".claude"),
         claude_settings: temp_dir.path().join(".claude/settings.json"),
-        claude_agents: temp_dir.path().join(".claude/agents"),
-        claude_hooks: temp_dir.path().join(".claude/hooks"),
-        claude_commands: temp_dir.path().join(".claude/commands"),
     }
 }

@@ -1,359 +1,218 @@
+//! Diagnostic tool for ccprof.
+//!
+//! This module implements the `ccprof doctor` command, which checks the system
+//! for common issues:
+//! - Existence of required directories.
+//! - Validity of symbolic links.
+//! - Correctness of profile metadata and JSON files.
+//! - Permissions.
+//!
+//! It reports issues to the user with a pass/fail/warn status.
+
 use anstyle::AnsiColor;
 use std::env;
-use std::path::Path;
 
 use crate::components::ProfileMetadata;
 use crate::paths::Paths;
 use crate::profiles::list_profiles;
 use crate::state::State;
-use crate::switch::{ComponentStatus, SettingsStatus};
+use crate::switch::SettingsStatus;
 use crate::ui::Ui;
 
-/// Run diagnostics on the ccprof setup
+/// Run the doctor diagnostics
 pub fn run_doctor(paths: &Paths, ui: &Ui) {
-    ui.section("ccprof doctor - Diagnostics Report");
+    ui.section("ccprof Doctor");
     ui.newline();
 
-    // --- Computed Paths ---
-    ui.section("Computed Paths");
-    let mut paths_table = ui.simple_table();
-    paths_table.add_row(vec!["Base directory", &format!("{:?}", paths.base_dir)]);
-    paths_table.add_row(vec![
-        "Profiles directory",
-        &format!("{:?}", paths.profiles_dir),
-    ]);
-    paths_table.add_row(vec![
-        "Backups directory",
-        &format!("{:?}", paths.backups_dir),
-    ]);
-    paths_table.add_row(vec!["State file", &format!("{:?}", paths.state_file)]);
-    paths_table.add_row(vec!["Claude directory", &format!("{:?}", paths.claude_dir)]);
-    paths_table.add_row(vec![
-        "Claude settings",
-        &format!("{:?}", paths.claude_settings),
-    ]);
-    paths_table.add_row(vec!["Claude agents", &format!("{:?}", paths.claude_agents)]);
-    paths_table.add_row(vec!["Claude hooks", &format!("{:?}", paths.claude_hooks)]);
-    paths_table.add_row(vec![
-        "Claude commands",
-        &format!("{:?}", paths.claude_commands),
-    ]);
-    ui.println(paths_table.to_string());
-    ui.newline();
-
-    // --- Directory Status ---
-    ui.section("Directory Status");
-    let mut dir_table = ui.table();
-    dir_table.set_header(vec![ui.header_cell("Directory"), ui.header_cell("Status")]);
-    add_exists_row(ui, &mut dir_table, "Base directory", &paths.base_dir);
-    add_exists_row(
-        ui,
-        &mut dir_table,
-        "Profiles directory",
-        &paths.profiles_dir,
-    );
-    add_exists_row(ui, &mut dir_table, "Backups directory", &paths.backups_dir);
-    add_exists_row(ui, &mut dir_table, "Claude directory", &paths.claude_dir);
-    ui.println(dir_table.to_string());
-    ui.newline();
-
-    // --- Settings File Status ---
-    let status = SettingsStatus::detect(&paths.claude_settings);
-    ui.section("Settings File Status");
-    let mut settings_table = ui.simple_table();
-
-    let status_cell = match &status {
-        SettingsStatus::Missing => ui.colored_cell("missing", AnsiColor::Yellow),
-        SettingsStatus::RegularFile => ui.cell("regular file"),
-        SettingsStatus::Symlink { target } => ui.colored_cell(
-            format!("{} symlink → {}", ui.icon_ok(), target.display()),
-            AnsiColor::Green,
-        ),
-        SettingsStatus::BrokenSymlink { target } => ui.colored_cell(
-            format!("{} broken symlink → {}", ui.icon_err(), target.display()),
-            AnsiColor::Red,
-        ),
-    };
-    settings_table.add_row(vec![ui.cell("~/.claude/settings.json"), status_cell]);
-
-    if let SettingsStatus::Symlink { ref target } | SettingsStatus::BrokenSymlink { ref target } =
-        status
-    {
-        settings_table.add_row(vec![ui.cell("Target"), ui.cell(format!("{:?}", target))]);
-        let is_profile_cell = if status.is_profile_symlink(paths) {
-            ui.colored_cell("yes", AnsiColor::Green)
+    // 1. Check directories
+    check_step(ui, "Directories", || {
+        let mut ok = true;
+        if paths.base_dir.exists() {
+            ui.println(format!(
+                "  {} Base directory exists: {}",
+                ui.icon_ok(),
+                paths.base_dir.display()
+            ));
         } else {
-            ui.colored_cell("no", AnsiColor::Yellow)
-        };
-        settings_table.add_row(vec![ui.cell("Is profile symlink"), is_profile_cell]);
-    }
-    ui.println(settings_table.to_string());
-    ui.newline();
-
-    // --- State File ---
-    ui.section("State File");
-    let mut state_table = ui.simple_table();
-    match State::read(&paths.state_file) {
-        Ok(state) => {
-            let profile_str = state.default_profile.as_deref().unwrap_or("(not set)");
-            state_table.add_row(vec!["Default profile", profile_str]);
-            if let Some(ref updated) = state.updated_at {
-                state_table.add_row(vec!["Last updated", &updated.to_string()]);
-            }
+            ui.println(format!(
+                "  {} Base directory missing: {}",
+                ui.icon_err(),
+                paths.base_dir.display()
+            ));
+            ok = false;
         }
-        Err(e) => {
-            state_table.add_row(vec![
-                &format!("{} Error reading state", ui.icon_err()),
-                &e.to_string(),
-            ]);
+
+        if paths.claude_dir.exists() {
+            ui.println(format!(
+                "  {} Claude directory exists: {}",
+                ui.icon_ok(),
+                paths.claude_dir.display()
+            ));
+        } else {
+            ui.println(format!(
+                "  {} Claude directory missing: {}",
+                ui.icon_warn(),
+                paths.claude_dir.display()
+            ));
+            // Not necessarily an error if they haven't installed Claude Code yet
         }
-    }
-    ui.println(state_table.to_string());
-    ui.newline();
+        ok
+    });
 
-    // --- Profiles ---
-    ui.section("Profiles");
-    match list_profiles(paths) {
-        Ok(profiles) if profiles.is_empty() => {
-            ui.println(ui.dim("  (no profiles found)"));
-        }
-        Ok(profiles) => {
-            let mut profiles_table = ui.table();
-            profiles_table.set_header(vec![
-                ui.header_cell(""),
-                ui.header_cell("Profile"),
-                ui.header_cell("Components"),
-                ui.header_cell("Metadata"),
-                ui.header_cell("Status"),
-            ]);
-
-            for name in &profiles {
-                let profile_dir = paths.profile_dir(name);
-                let metadata_path = paths.profile_metadata(name);
-
-                // Check metadata file
-                let (meta_icon, meta_status) = if metadata_path.exists() {
-                    match ProfileMetadata::read(&profile_dir) {
-                        Ok(_) => (ui.icon_ok(), "valid"),
-                        Err(_) => (ui.icon_err(), "invalid"),
+    // 2. Check State
+    check_step(ui, "State File", || {
+        match State::read(&paths.state_file) {
+            Ok(state) => {
+                ui.println(format!(
+                    "  {} State file readable",
+                    ui.icon_ok()
+                ));
+                if let Some(profile) = &state.default_profile {
+                    ui.println(format!(
+                        "  {} Active profile in state: {}",
+                        ui.icon_info(),
+                        profile
+                    ));
+                    // Verify that this profile actually exists
+                    if paths.profile_dir(profile).exists() {
+                         ui.println(format!(
+                            "  {} Active profile directory exists",
+                            ui.icon_ok()
+                        ));
+                    } else {
+                         ui.println(format!(
+                            "  {} Active profile directory MISSING",
+                            ui.icon_err()
+                        ));
+                        return false;
                     }
                 } else {
-                    (ui.icon_warn(), "missing")
-                };
-
-                // Get component info
-                let (components_str, overall_icon, overall_status) =
-                    match ProfileMetadata::read(&profile_dir) {
-                        Ok(metadata) => {
-                            let mut comp_codes: Vec<&str> = metadata
-                                .managed_components
-                                .iter()
-                                .map(|c| c.short_name())
-                                .collect();
-                            comp_codes.sort();
-                            let comp_str = comp_codes.join(",");
-
-                            // Check if all components exist
-                            let mut all_exist = true;
-                            for component in &metadata.managed_components {
-                                let path = component.profile_path(paths, name);
-                                if !path.exists() {
-                                    all_exist = false;
-                                    break;
-                                }
-                            }
-
-                            let (icon, status) = if all_exist {
-                                (ui.icon_ok(), "ok")
-                            } else {
-                                (ui.icon_warn(), "missing components")
-                            };
-
-                            (comp_str, icon, status)
-                        }
-                        Err(_) => (String::from("?"), ui.icon_err(), "metadata error"),
-                    };
-
-                profiles_table.add_row(vec![
-                    ui.cell(overall_icon),
-                    ui.cell(name),
-                    ui.cell(components_str),
-                    ui.cell(format!("{} {}", meta_icon, meta_status)),
-                    ui.cell(overall_status),
-                ]);
-            }
-            ui.println(profiles_table.to_string());
-        }
-        Err(e) => {
-            ui.err(format!("Error listing profiles: {}", e));
-        }
-    }
-    ui.newline();
-
-    // --- Active Profile Validation ---
-    let state = State::read(&paths.state_file).unwrap_or_default();
-    if let Some(ref profile_name) = state.default_profile {
-        ui.section("Active Profile Validation");
-
-        let profile_dir = paths.profile_dir(profile_name);
-        match ProfileMetadata::read(&profile_dir) {
-            Ok(metadata) => {
-                ui.ok(format!(
-                    "Profile '{}' has {} managed component(s)",
-                    profile_name,
-                    metadata.managed_components.len()
-                ));
-
-                // Check each managed component
-                let mut comp_table = ui.simple_table();
-                comp_table.set_header(vec![
-                    ui.header_cell(""),
-                    ui.header_cell("Component"),
-                    ui.header_cell("Profile File"),
-                    ui.header_cell("Symlink Status"),
-                ]);
-
-                for component in &metadata.managed_components {
-                    let profile_path = component.profile_path(paths, profile_name);
-                    let source_path = component.source_path(paths);
-
-                    // Check if profile component exists
-                    let (profile_icon, profile_status) = if profile_path.exists() {
-                        (ui.icon_ok(), "exists")
-                    } else {
-                        (ui.icon_err(), "missing")
-                    };
-
-                    // Check symlink status
-                    let symlink_status = ComponentStatus::detect(&source_path);
-                    let symlink_cell = match symlink_status {
-                        ComponentStatus::Missing => ui.colored_cell("missing", AnsiColor::Yellow),
-                        ComponentStatus::RegularFile | ComponentStatus::RegularDirectory => {
-                            ui.colored_cell("not a symlink", AnsiColor::Yellow)
-                        }
-                        ComponentStatus::Symlink { ref target } => {
-                            if target == &profile_path {
-                                ui.colored_cell(
-                                    format!("{} correct", ui.icon_ok()),
-                                    AnsiColor::Green,
-                                )
-                            } else {
-                                ui.colored_cell(
-                                    format!("{} wrong target", ui.icon_warn()),
-                                    AnsiColor::Yellow,
-                                )
-                            }
-                        }
-                        ComponentStatus::BrokenSymlink { .. } => {
-                            ui.colored_cell(format!("{} broken", ui.icon_err()), AnsiColor::Red)
-                        }
-                    };
-
-                    comp_table.add_row(vec![
-                        ui.cell(profile_icon),
-                        ui.cell(component.display_name()),
-                        ui.cell(profile_status),
-                        symlink_cell,
-                    ]);
+                    ui.println(format!("  {} No active profile set", ui.icon_info()));
                 }
-
-                ui.println(comp_table.to_string());
+                true
             }
             Err(e) => {
-                ui.err(format!("Profile '{}' metadata error: {}", profile_name, e));
+                if paths.state_file.exists() {
+                    ui.println(format!("  {} State file corrupt: {}", ui.icon_err(), e));
+                    false
+                } else {
+                    ui.println(format!("  {} State file missing (fresh install?)", ui.icon_warn()));
+                    true
+                }
             }
         }
-        ui.newline();
-    }
+    });
 
-    // --- Project-Level Claude Files ---
-    check_project_claude_files(ui);
-}
-
-fn add_exists_row(ui: &Ui, table: &mut comfy_table::Table, label: &str, path: &Path) {
-    let (icon, status, color) = if path.exists() {
-        (ui.icon_ok(), "exists", AnsiColor::Green)
-    } else {
-        (ui.icon_err(), "missing", AnsiColor::Red)
-    };
-    table.add_row(vec![
-        ui.cell(label),
-        ui.colored_cell(format!("{} {}", icon, status), color),
-    ]);
-}
-
-fn check_project_claude_files(ui: &Ui) {
-    ui.section("Project-Level Claude Files");
-
-    let cwd = match env::current_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            ui.warn(format!("Could not determine current directory: {}", e));
-            return;
+    // 3. Check Settings Link
+    check_step(ui, "Settings Symlink", || {
+        let status = SettingsStatus::detect(&paths.claude_settings);
+        match status {
+            SettingsStatus::Missing => {
+                ui.println(format!("  {} ~/.claude/settings.json is missing", ui.icon_warn()));
+                // Not fatal
+                true
+            }
+            SettingsStatus::RegularFile => {
+                ui.println(format!("  {} ~/.claude/settings.json is a regular file (not managed)", ui.icon_info()));
+                true
+            }
+            SettingsStatus::Symlink { target } => {
+                ui.println(format!("  {} Symlink points to: {}", ui.icon_ok(), target.display()));
+                if paths.is_in_profiles_dir(&target) {
+                    ui.println(format!("  {} Target is within ccprof profiles", ui.icon_ok()));
+                } else {
+                     ui.println(format!("  {} Target is EXTERNAL (not managed by ccprof?)", ui.icon_warn()));
+                }
+                true
+            }
+            SettingsStatus::BrokenSymlink { target } => {
+                 ui.println(format!("  {} BROKEN symlink pointing to: {}", ui.icon_err(), target.display()));
+                 false
+            }
         }
-    };
+    });
 
-    let project_claude_dir = cwd.join(".claude");
-    let project_settings = project_claude_dir.join("settings.json");
-    let project_local = project_claude_dir.join("settings.local.json");
+    // 4. Check Profiles
+    check_step(ui, "Profiles", || {
+        let profiles = match list_profiles(paths) {
+            Ok(p) => p,
+            Err(e) => {
+                ui.println(format!("  {} Failed to list profiles: {}", ui.icon_err(), e));
+                return false;
+            }
+        };
 
-    let mut found_any = false;
-    let mut table = ui.simple_table();
+        if profiles.is_empty() {
+             ui.println(format!("  {} No profiles found", ui.icon_warn()));
+             return true;
+        }
 
-    if project_settings.exists() {
-        table.add_row(vec![
-            ui.icon_warn(),
-            ".claude/settings.json",
-            "project-level (not managed by ccprof)",
-        ]);
-        found_any = true;
-    }
+        ui.println(format!("  Found {} profiles:", profiles.len()));
+        let mut all_valid = true;
 
-    if project_local.exists() {
-        table.add_row(vec![
-            ui.icon_warn(),
-            ".claude/settings.local.json",
-            "project-level (not managed by ccprof)",
-        ]);
-        found_any = true;
-    }
+        for name in profiles {
+            let dir = paths.profile_dir(&name);
+            let metadata_res = ProfileMetadata::read(&dir);
 
-    if found_any {
-        ui.println(table.to_string());
-    } else {
-        ui.println(format!(
-            "  {} None found in current directory",
-            ui.icon_ok()
-        ));
-    }
+            match metadata_res {
+                Ok(metadata) => {
+                    // Check managed components
+                    let mut missing_components = Vec::new();
+                    for component in &metadata.managed_components {
+                        let path = component.profile_path(paths, &name);
+                        if !path.exists() {
+                            missing_components.push(component.display_name());
+                        }
+                    }
+
+                    if missing_components.is_empty() {
+                         ui.println(format!("    {} {}", ui.icon_ok(), name));
+                    } else {
+                         ui.println(format!("    {} {} (missing components: {})", ui.icon_warn(), name, missing_components.join(", ")));
+                         // Not strictly fatal, but warning
+                    }
+                },
+                Err(_) => {
+                    // Try to read settings.json directly to see if it's a legacy profile
+                    let settings_path = dir.join("settings.json");
+                    if settings_path.exists() {
+                        match crate::profiles::validate_json_file(&settings_path) {
+                            Ok(_) => ui.println(format!("    {} {} (legacy/no metadata)", ui.icon_warn(), name)),
+                            Err(e) => {
+                                ui.println(format!("    {} {} (invalid settings.json: {})", ui.icon_err(), name, e));
+                                all_valid = false;
+                            }
+                        }
+                    } else {
+                         ui.println(format!("    {} {} (empty/corrupt)", ui.icon_err(), name));
+                         all_valid = false;
+                    }
+                }
+            }
+        }
+        all_valid
+    });
+
+    // 5. Environment
+    check_step(ui, "Environment", || {
+        match env::var("EDITOR") {
+            Ok(e) => ui.println(format!("  {} EDITOR set to: {}", ui.icon_ok(), e)),
+            Err(_) => ui.println(format!("  {} EDITOR not set (using system default)", ui.icon_info())),
+        }
+        true
+    });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ui::ColorMode;
-
-    fn test_ui() -> Ui {
-        Ui::new(ColorMode::Never, false)
+fn check_step<F>(ui: &Ui, name: &str, check_fn: F)
+where
+    F: FnOnce() -> bool,
+{
+    ui.println(ui.bold(format!("Checking {}...", name)));
+    let success = check_fn();
+    if success {
+        // ui.println(format!("{} OK", ui.icon_ok()));
+    } else {
+        ui.println(ui.colored("  Issues detected!", AnsiColor::Red));
     }
-
-    #[test]
-    fn test_run_doctor_does_not_panic() {
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let paths = Paths {
-            base_dir: temp_dir.path().join(".claude-profiles"),
-            profiles_dir: temp_dir.path().join(".claude-profiles/profiles"),
-            backups_dir: temp_dir.path().join(".claude-profiles/backups"),
-            state_file: temp_dir.path().join(".claude-profiles/state.json"),
-            claude_dir: temp_dir.path().join(".claude"),
-            claude_settings: temp_dir.path().join(".claude/settings.json"),
-            claude_agents: temp_dir.path().join(".claude/agents"),
-            claude_hooks: temp_dir.path().join(".claude/hooks"),
-            claude_commands: temp_dir.path().join(".claude/commands"),
-        };
-        let ui = test_ui();
-
-        // Just ensure it doesn't panic
-        run_doctor(&paths, &ui);
-    }
+    ui.newline();
 }

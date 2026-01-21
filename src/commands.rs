@@ -1,3 +1,15 @@
+//! High-level command orchestration for the CLI.
+//! 
+//! This module contains the handler functions for each CLI command (`list`, `add`, `use`, etc.).
+//! It serves as the coordination layer, interacting with:
+//! - `crate::ui` for user interaction (output, prompts).
+//! - `crate::paths` for filesystem locations.
+//! - `crate::profiles` for profile management logic.
+//! - `crate::switch` for profile activation logic.
+//! - `crate::state` for persistent state.
+//! 
+//! Each function here generally corresponds to a subcommand in `main.rs`.
+
 use anstyle::AnsiColor;
 use anyhow::{Context, Result, bail};
 use inquire::MultiSelect;
@@ -9,7 +21,10 @@ use crate::components::Component;
 use crate::doctor::run_doctor;
 use crate::paths::Paths;
 use crate::profiles::{
-    create_profile_with_components, list_profiles, profile_exists, update_profile_components,
+    create_profile_with_components,
+    list_profiles,
+    profile_exists,
+    update_profile_components,
 };
 use crate::state::State;
 use crate::switch::{SettingsStatus, switch_to_profile};
@@ -24,7 +39,7 @@ pub fn list(paths: &Paths, ui: &Ui) -> Result<()> {
         ui.newline();
         ui.println("Create one with:");
         ui.println(format!("  {} add <name> --from-current", ui.bold("ccprof")));
-        return Ok(());
+        return Ok(())
     }
 
     // Get current default profile for marking
@@ -99,15 +114,9 @@ pub fn current(paths: &Paths, ui: &Ui) -> Result<()> {
     // Show default profile from state
     match &state.default_profile {
         Some(profile) => {
-            table.add_row(vec![
-                ui.cell("Selected profile:"),
-                ui.header_cell(profile), // bold
-            ]);
+            table.add_row(vec![ui.cell("Selected profile:"), ui.header_cell(profile)]); // bold
             if let Some(updated) = &state.updated_at {
-                table.add_row(vec![
-                    ui.cell("Last switched:"),
-                    ui.cell(updated.to_string()),
-                ]);
+                table.add_row(vec![ui.cell("Last switched:"), ui.cell(updated.to_string())]);
             }
         }
         None => {
@@ -134,18 +143,14 @@ pub fn current(paths: &Paths, ui: &Ui) -> Result<()> {
                 .strip_prefix(&paths.profiles_dir)
                 .ok()
                 .and_then(|p| p.components().next())
-                .and_then(|c| c.as_os_str().to_str())
-            {
+                .and_then(|c| c.as_os_str().to_str()) {
                 table.add_row(vec![
                     ui.cell("Linked profile:"),
                     ui.colored_cell(profile_name, AnsiColor::Green),
                 ]);
             }
         } else {
-            table.add_row(vec![
-                ui.cell(""),
-                ui.colored_cell("(symlink outside profiles dir)", AnsiColor::Yellow),
-            ]);
+            table.add_row(vec![ui.cell(""), ui.colored_cell("(symlink outside profiles dir)", AnsiColor::Yellow)]);
         }
     }
 
@@ -176,10 +181,7 @@ pub fn inspect(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
         ui.cell(metadata.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
     ]);
 
-    table.add_row(vec![
-        ui.cell("Updated:"),
-        ui.cell(metadata.updated_at.format("%Y-%m-%d %H:%M:%S").to_string()),
-    ]);
+    table.add_row(vec![ui.cell("Updated:"), ui.cell(metadata.updated_at.format("%Y-%m-%d %H:%M:%S").to_string())]);
 
     table.add_row(vec![ui.cell("Version:"), ui.cell(&metadata.version)]);
 
@@ -187,10 +189,7 @@ pub fn inspect(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
         table.add_row(vec![
             ui.cell("Migration:"),
             ui.colored_cell(
-                format!(
-                    "Migrated from legacy ({})",
-                    migration.migration_date.format("%Y-%m-%d")
-                ),
+                format!("Migrated from legacy ({})", migration.migration_date.format("%Y-%m-%d")),
                 AnsiColor::Yellow,
             ),
         ]);
@@ -240,11 +239,11 @@ fn calculate_size(path: &Path) -> Result<String> {
 
     let size = if path.is_file() {
         fs::metadata(path)
-            .with_context(|| format!("Failed to read metadata for {}", path.display()))?
+            .with_context(|| format!("Failed to read metadata for {}", path.display()))? 
             .len()
     } else if path.is_dir() {
         crate::fs_utils::dir_size(path)
-            .with_context(|| format!("Failed to calculate size for {}", path.display()))?
+            .with_context(|| format!("Failed to calculate size for {}", path.display()))? 
     } else {
         0
     };
@@ -314,8 +313,7 @@ pub fn select_components(paths: &Paths) -> Result<HashSet<Component>> {
 
     if selected.is_empty() {
         bail!(
-            "At least one component must be selected.\n\
-             Hint: Use Space to toggle components, then press Enter to confirm."
+            "At least one component must be selected.\nHint: Use Space to toggle components, then press Enter to confirm."
         );
     }
 
@@ -434,8 +432,7 @@ pub fn edit(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
 pub fn edit_component(paths: &Paths, name: &str, component: &str, ui: &Ui) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -443,8 +440,7 @@ pub fn edit_component(paths: &Paths, name: &str, component: &str, ui: &Ui) -> Re
     // Parse component
     let comp: Component = component.parse().map_err(|_| {
         anyhow::anyhow!(
-            "Invalid component: '{}'\n\
-             Hint: Valid components are settings, agents, hooks, commands",
+            "Invalid component: '{}'\nHint: Valid components are settings, agents, hooks, commands",
             component
         )
     })?;
@@ -453,8 +449,7 @@ pub fn edit_component(paths: &Paths, name: &str, component: &str, ui: &Ui) -> Re
 
     if !component_path.exists() {
         bail!(
-            "Component '{}' not found in profile '{}'.\n\
-             Hint: This profile may not include this component.",
+            "Component '{}' not found in profile '{}'.\nHint: This profile may not include this component.",
             component,
             name
         );
@@ -470,8 +465,7 @@ pub fn edit_component(paths: &Paths, name: &str, component: &str, ui: &Ui) -> Re
 pub fn edit_all_components(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -481,8 +475,7 @@ pub fn edit_all_components(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
 
     if metadata.managed_components.is_empty() {
         bail!(
-            "Profile '{}' has no managed components.\n\
-             Hint: Use 'ccprof edit {} --track' to add components.",
+            "Profile '{}' has no managed components.\nHint: Use 'ccprof edit {} --track' to add components.",
             name,
             name
         );
@@ -503,10 +496,7 @@ pub fn edit_all_components(paths: &Paths, name: &str, ui: &Ui) -> Result<()> {
 
     // Open all in editor
     open_multiple_in_editor(&paths_to_open)?;
-    ui.ok(format!(
-        "Opened {} component(s) in editor",
-        paths_to_open.len()
-    ));
+    ui.ok(format!("Opened {} component(s) in editor", paths_to_open.len()));
     Ok(())
 }
 
@@ -594,8 +584,7 @@ pub fn edit_components(
                     }
                     Err(_) => {
                         bail!(
-                            "Invalid component name: '{}'\n\
-                         Valid components: settings, agents, hooks, commands",
+                            "Invalid component name: '{}'\nValid components: settings, agents, hooks, commands",
                             comp_name
                         );
                     }
@@ -605,8 +594,7 @@ pub fn edit_components(
         }
     } else {
         bail!(
-            "No components specified.\n\
-             Hint: Use --components settings,agents,hooks,commands or run interactively."
+            "No components specified.\nHint: Use --components settings,agents,hooks,commands or run interactively."
         );
     };
 
@@ -644,7 +632,7 @@ fn edit_select_components(
                 ""
             };
             format!(
-                "{}{}{}{}",
+                "{}{} {}{}",
                 indicator,
                 c.display_name(),
                 availability,
@@ -684,8 +672,7 @@ fn edit_select_components(
 
     if selected.is_empty() {
         bail!(
-            "At least one component must be selected.\n\
-             Hint: Use Space to toggle components, then press Enter to confirm."
+            "At least one component must be selected.\nHint: Use Space to toggle components, then press Enter to confirm."
         );
     }
 
@@ -704,7 +691,7 @@ pub fn backup_list(paths: &Paths, ui: &Ui) -> Result<()> {
         ui.warn("No backups found.");
         ui.newline();
         ui.println("Backups are created automatically when switching profiles.");
-        return Ok(());
+        return Ok(())
     }
 
     let entries: Vec<_> = std::fs::read_dir(&paths.backups_dir)?
@@ -714,7 +701,7 @@ pub fn backup_list(paths: &Paths, ui: &Ui) -> Result<()> {
 
     if entries.is_empty() {
         ui.warn("No backups found.");
-        return Ok(());
+        return Ok(())
     }
 
     // Parse and sort backups by timestamp
@@ -785,8 +772,7 @@ pub fn backup_restore(paths: &Paths, id: &str, ui: &Ui) -> Result<()> {
 
     if !backup_path.exists() {
         bail!(
-            "Backup '{}' not found.\n\
-             Hint: Use 'ccprof backup list' to see available backups.",
+            "Backup '{}' not found.\nHint: Use 'ccprof backup list' to see available backups.",
             id
         );
     }
@@ -802,8 +788,7 @@ pub fn backup_restore(paths: &Paths, id: &str, ui: &Ui) -> Result<()> {
         Component::Commands
     } else {
         bail!(
-            "Cannot determine component type from backup name: {}\n\
-             Hint: Backup names should start with 'settings.json.', 'agents.', etc.",
+            "Cannot determine component type from backup name: {}\nHint: Backup names should start with 'settings.json.', 'agents.', etc.",
             id
         );
     };
@@ -818,7 +803,7 @@ pub fn backup_restore(paths: &Paths, id: &str, ui: &Ui) -> Result<()> {
 
     if !confirm {
         ui.warn("Restore cancelled.");
-        return Ok(());
+        return Ok(())
     }
 
     // Remove current target if it exists
@@ -848,7 +833,7 @@ pub fn backup_restore(paths: &Paths, id: &str, ui: &Ui) -> Result<()> {
 pub fn backup_clean(paths: &Paths, keep: usize, ui: &Ui) -> Result<()> {
     if !paths.backups_dir.exists() {
         ui.warn("No backups directory found.");
-        return Ok(());
+        return Ok(())
     }
 
     let mut removed = 0;
@@ -890,13 +875,11 @@ pub fn backup_clean(paths: &Paths, keep: usize, ui: &Ui) -> Result<()> {
     if removed > 0 {
         ui.ok(format!(
             "Removed {} old backup(s), keeping {} per component",
-            removed, keep
-        ));
-    } else {
-        ui.ok(format!(
-            "No backups to clean (keeping {} per component)",
+            removed,
             keep
         ));
+    } else {
+        ui.ok(format!("No backups to clean (keeping {} per component)", keep));
     }
 
     Ok(())
@@ -906,8 +889,7 @@ pub fn backup_clean(paths: &Paths, keep: usize, ui: &Ui) -> Result<()> {
 pub fn remove(paths: &Paths, name: &str, ui: &Ui, force: bool) -> Result<()> {
     if !profile_exists(paths, name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             name
         );
     }
@@ -918,26 +900,22 @@ pub fn remove(paths: &Paths, name: &str, ui: &Ui, force: bool) -> Result<()> {
 
     if is_active {
         bail!(
-            "Cannot remove '{}' because it is the currently active profile.\n\
-             Hint: Switch to another profile first with 'ccprof use <other-profile>'.",
+            "Cannot remove '{}' because it is the currently active profile.\nHint: Switch to another profile first with 'ccprof use <other-profile>'.",
             name
         );
     }
 
     // Confirm unless --force
     if !force {
-        let confirm = inquire::Confirm::new(&format!(
-            "Are you sure you want to remove profile '{}'?",
-            name
-        ))
-        .with_default(false)
-        .with_help_message("This will permanently delete the profile and all its settings")
-        .prompt()
-        .context("Confirmation cancelled")?;
+        let confirm = inquire::Confirm::new(&format!("Are you sure you want to remove profile '{}'?", name))
+            .with_default(false)
+            .with_help_message("This will permanently delete the profile and all its settings")
+            .prompt()
+            .context("Confirmation cancelled")?;
 
         if !confirm {
             ui.warn("Removal cancelled.");
-            return Ok(());
+            return Ok(())
         }
     }
 
@@ -953,15 +931,13 @@ pub fn diff(paths: &Paths, profile1: &str, profile2: &str, component: &str, ui: 
     // Validate both profiles exist
     if !profile_exists(paths, profile1) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             profile1
         );
     }
     if !profile_exists(paths, profile2) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             profile2
         );
     }
@@ -969,8 +945,7 @@ pub fn diff(paths: &Paths, profile1: &str, profile2: &str, component: &str, ui: 
     // Parse component
     let comp: Component = component.parse().map_err(|_| {
         anyhow::anyhow!(
-            "Invalid component: '{}'\n\
-             Hint: Valid components are settings, agents, hooks, commands",
+            "Invalid component: '{}'\nHint: Valid components are settings, agents, hooks, commands",
             component
         )
     })?;
@@ -982,27 +957,20 @@ pub fn diff(paths: &Paths, profile1: &str, profile2: &str, component: &str, ui: 
     // Check if component exists in both profiles
     if !path1.exists() {
         bail!(
-            "Component '{}' not found in profile '{}'.\n\
-             Hint: This profile may not include this component.",
+            "Component '{}' not found in profile '{}'.\nHint: This profile may not include this component.",
             component,
             profile1
         );
     }
     if !path2.exists() {
         bail!(
-            "Component '{}' not found in profile '{}'.\n\
-             Hint: This profile may not include this component.",
+            "Component '{}' not found in profile '{}'.\nHint: This profile may not include this component.",
             component,
             profile2
         );
     }
 
-    ui.section(format!(
-        "Comparing {} between '{}' and '{}'",
-        comp.display_name(),
-        profile1,
-        profile2
-    ));
+    ui.section(format!("Comparing {} between '{}' and '{}'", comp.display_name(), profile1, profile2));
     ui.newline();
 
     if comp.is_file() {
@@ -1036,7 +1004,7 @@ fn diff_json_files(
 
     if json1 == json2 {
         ui.ok("Files are identical");
-        return Ok(());
+        return Ok(())
     }
 
     // Find differences
@@ -1045,23 +1013,15 @@ fn diff_json_files(
 
     if differences.is_empty() {
         ui.ok("Files are identical");
-        return Ok(());
+        return Ok(())
     }
 
     // Display differences
     let mut table = ui.table();
-    table.set_header(vec![
-        ui.header_cell("Key"),
-        ui.header_cell(name1),
-        ui.header_cell(name2),
-    ]);
+    table.set_header(vec![ui.header_cell("Key"), ui.header_cell(name1), ui.header_cell(name2)]);
 
     for (key, val1, val2) in &differences {
-        table.add_row(vec![
-            ui.cell(key),
-            ui.cell(format_json_value(val1)),
-            ui.cell(format_json_value(val2)),
-        ]);
+        table.add_row(vec![ui.cell(key), ui.cell(format_json_value(val1)), ui.cell(format_json_value(val2))]);
     }
 
     ui.println(table.to_string());
@@ -1076,55 +1036,55 @@ fn compare_json_values(
     v1: &serde_json::Value,
     v2: &serde_json::Value,
     path: &str,
-    differences: &mut Vec<(String, Option<serde_json::Value>, Option<serde_json::Value>)>,
+    differences: &mut Vec<(String, Option<serde_json::Value>, Option<serde_json::Value>)>, 
 ) {
     use serde_json::Value;
 
     match (v1, v2) {
         (Value::Object(o1), Value::Object(o2)) => {
             // Check keys in o1
-            for (key, val1) in o1 {
-                let new_path = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{}.{}", path, key)
-                };
-
-                match o2.get(key) {
-                    Some(val2) => {
-                        compare_json_values(val1, val2, &new_path, differences);
+                        for (key, val1) in o1 {
+                            let new_path = if path.is_empty() {
+                                key.clone()
+                            } else {
+                                format!("{}.{}", path, key)
+                            };
+            
+                            match o2.get(key) {
+                                Some(val2) => {
+                                    compare_json_values(val1, val2, &new_path, differences);
+                                }
+                                None => {
+                                    differences.push((new_path, Some(val1.clone()), None));
+                                }
+                            }
+                        }
+                        // Check keys only in o2
+                        for (key, val2) in o2 {
+                            if !o1.contains_key(key) {
+                                let new_path = if path.is_empty() {
+                                    key.clone()
+                                } else {
+                                    format!("{}.{}", path, key)
+                                };
+                                differences.push((new_path, None, Some(val2.clone())));
+                            }
+                        }
                     }
-                    None => {
-                        differences.push((new_path, Some(val1.clone()), None));
+                    (Value::Array(a1), Value::Array(a2)) => {
+                        if a1 != a2 {
+                            differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
+                        }
+                    }
+                    _ => {
+                        if v1 != v2 {
+                            differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
+                        }
                     }
                 }
             }
-            // Check keys only in o2
-            for (key, val2) in o2 {
-                if !o1.contains_key(key) {
-                    let new_path = if path.is_empty() {
-                        key.clone()
-                    } else {
-                        format!("{}.{}", path, key)
-                    };
-                    differences.push((new_path, None, Some(val2.clone())));
-                }
-            }
-        }
-        (Value::Array(a1), Value::Array(a2)) => {
-            if a1 != a2 {
-                differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
-            }
-        }
-        _ => {
-            if v1 != v2 {
-                differences.push((path.to_string(), Some(v1.clone()), Some(v2.clone())));
-            }
-        }
-    }
-}
-
-/// Format a JSON value for display (truncate if too long)
+            
+            /// Format a JSON value for display (truncate if too long)
 fn format_json_value(val: &Option<serde_json::Value>) -> String {
     match val {
         None => "(missing)".to_string(),
@@ -1215,14 +1175,7 @@ fn diff_directories(
     if !has_diff {
         ui.ok("Directories are identical");
     } else {
-        ui.info(format!(
-            "{} only in {}, {} only in {}, {} different",
-            only_in_1.len(),
-            name1,
-            only_in_2.len(),
-            name2,
-            content_diffs.len()
-        ));
+        ui.info(format!("{} only in {}, {} only in {}, {} different", only_in_1.len(), name1, only_in_2.len(), name2, content_diffs.len()));
     }
 
     Ok(())
@@ -1232,16 +1185,14 @@ fn diff_directories(
 pub fn rename(paths: &Paths, old_name: &str, new_name: &str, ui: &Ui) -> Result<()> {
     if !profile_exists(paths, old_name) {
         bail!(
-            "Profile '{}' does not exist.\n\
-             Hint: Use 'ccprof list' to see available profiles.",
+            "Profile '{}' does not exist.\nHint: Use 'ccprof list' to see available profiles.",
             old_name
         );
     }
 
     if profile_exists(paths, new_name) {
         bail!(
-            "Profile '{}' already exists.\n\
-             Hint: Choose a different name or remove the existing profile first.",
+            "Profile '{}' already exists.\nHint: Choose a different name or remove the existing profile first.",
             new_name
         );
     }
@@ -1277,16 +1228,12 @@ pub fn rename(paths: &Paths, old_name: &str, new_name: &str, ui: &Ui) -> Result<
                 && (paths.is_in_profiles_dir(&current_target)
                     || paths.is_in_profiles_dir(
                         &source.parent().unwrap_or(&source).join(&current_target),
-                    ))
-            {
-                crate::switch::create_component_symlink(&source, &target, component)?;
+                    )) {
+                crate::switch::create_component_symlink(&source, &target, component, &paths.backups_dir)?;
             }
         }
 
-        ui.ok(format!(
-            "Renamed profile '{}' to '{}' (symlinks updated)",
-            old_name, new_name
-        ));
+        ui.ok(format!("Renamed profile '{}' to '{}' (symlinks updated)", old_name, new_name));
     } else {
         ui.ok(format!("Renamed profile '{}' to '{}'", old_name, new_name));
     }

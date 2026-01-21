@@ -10,13 +10,15 @@ This document provides a deeper dive into the architecture, internals, and advan
 
 - **`main.rs`**: Entry point. Parses command-line arguments using `clap` and dispatches to command handlers.
 - **`lib.rs`**: Library root, re-exporting modules.
-- **`commands.rs`**: High-level handlers for each CLI command (`list`, `add`, `use`, etc.). Orchestrates interactions between the UI, paths, and logic.
+- **`commands.rs`**: High-level handlers for each CLI command (`list`, `add`, `use`, `doctor`, etc.). Orchestrates interactions between the UI, paths, and logic.
 - **`paths.rs`**: Centralized management of filesystem paths (`~/.claude-profiles`, etc.). specific to the user's OS (via `directories` crate).
-- **`profiles.rs`**: Core logic for profile management (listing, creating, validating).
-- **`switch.rs`**: Logic for switching profiles, handling backups, and managing symlinks.
+- **`profiles.rs`**: Core logic for profile management (listing, creating, validating, renaming, removing).
+- **`components.rs`**: Defines the `Component` enum (Settings, Agents, Hooks, Commands) and handles component-specific logic and metadata.
+- **`switch.rs`**: Logic for switching profiles, handling backups, and managing symlinks for various component types.
 - **`state.rs`**: Manages the persistent state file (`state.json`) which tracks the active profile.
 - **`ui.rs`**: Abstraction for console output, colors, tables (using `comfy-table`), and progress indicators (using `indicatif`).
 - **`doctor.rs`**: Diagnostics logic.
+- **`fs_utils.rs`**: Shared filesystem utilities (recursive copy, dir size calculation).
 
 ### Data Storage
 
@@ -27,19 +29,25 @@ This document provides a deeper dive into the architecture, internals, and advan
 
 Inside this directory:
 
-- `profiles/`: Subdirectories for each profile (e.g., `work/settings.json`).
-- `backups/`: timestamped backups of `settings.json` created when `ccprof` replaces a regular file with a symlink.
+- `profiles/`: Subdirectories for each profile.
+  - `profiles/<name>/metadata.json`: Stores profile creation time, version, and list of managed components.
+  - `profiles/<name>/settings.json`: The profile's settings file.
+  - `profiles/<name>/agents/`: The profile's agents directory (if managed).
+  - `profiles/<name>/hooks/`: The profile's hooks directory (if managed).
+  - `profiles/<name>/commands/`: The profile's commands directory (if managed).
+- `backups/`: Timestamped backups of files/directories created when `ccprof` replaces a regular file with a symlink.
 - `state.json`: A JSON file recording the name of the currently active profile and the timestamp of the last switch.
 
 ## Symlink Mechanism
 
-The core feature of `ccprof` is manipulating `~/.claude/settings.json`.
+The core feature of `ccprof` is manipulating files in `~/.claude/`.
 
-1. **Detection**: `ccprof` checks if `~/.claude/settings.json` is a regular file, a symlink, or missing.
+1. **Detection**: `ccprof` checks if target files (e.g., `~/.claude/settings.json`) are regular files, symlinks, or missing.
 2. **Safety**:
    - If it's a **regular file**, `ccprof` moves it to the `backups` directory before creating a symlink. This ensures no data loss.
    - If it's a **symlink** managed by `ccprof`, it updates the link to point to the new profile.
    - If it's a **broken symlink**, it forces an update.
+3. **Components**: `ccprof` can manage multiple components independently. A profile might manage `settings.json` and `agents`, but leave `hooks` unmanaged (local to the system).
 
 ## Environment Variables
 
@@ -71,7 +79,7 @@ Run the test suite, which uses `tempfile` to create isolated environments for fi
 cargo test
 ```
 
-### formatting
+### Formatting
 
 Ensure code adheres to standard Rust formatting:
 

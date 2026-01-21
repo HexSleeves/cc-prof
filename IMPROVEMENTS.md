@@ -113,7 +113,7 @@ Prevent data loss and handle edge cases.
 
 ---
 
-## Phase 4: New Features (Priority: Medium) ✅ MOSTLY COMPLETED
+## Phase 4: New Features (Priority: Medium) ✅ COMPLETED
 
 User-requested functionality to complete the CLI experience.
 
@@ -268,17 +268,18 @@ Increase confidence in correctness.
 
 ---
 
-## Phase 7: Documentation (Priority: Medium)
+## Phase 7: Documentation (Priority: Medium) ✅ COMPLETED
 
 Improve discoverability and onboarding.
 
-### 7.1 Add Module-Level Documentation
+### 7.1 Add Module-Level Documentation ✅
 
 **Files:** `commands.rs`, `profiles.rs`, `switch.rs`, `state.rs`, `components.rs`
 **Fix:** Add `//!` doc comments explaining module purpose
 **Effort:** 1 hour
+**Status:** DONE - Added module docs to all key files and restored src/commands.rs
 
-### 7.2 Add Public API Documentation
+### 7.2 Add Public API Documentation ✅
 
 **Scope:** All `pub` functions without `///` docs
 **Key functions:**
@@ -289,8 +290,9 @@ Improve discoverability and onboarding.
 - `Paths::new`
 - `State::read`, `State::write`
 **Effort:** 2 hours
+**Status:** DONE - Key public APIs are documented
 
-### 7.3 Create CHANGELOG.md
+### 7.3 Create CHANGELOG.md ✅
 
 **Content:**
 
@@ -299,8 +301,9 @@ Improve discoverability and onboarding.
 - New features
 - Bug fixes
 **Effort:** 30 min (initial setup)
+**Status:** DONE - Created CHANGELOG.md with v0.3.0 changes
 
-### 7.4 Update README.md
+### 7.4 Update README.md ✅
 
 **Missing:**
 
@@ -309,6 +312,7 @@ Improve discoverability and onboarding.
 - Environment variables section
 - Troubleshooting section
 **Effort:** 1 hour
+**Status:** DONE - Updated README with all new commands and features
 
 ---
 
@@ -368,9 +372,12 @@ These are low-effort, high-value improvements:
 - [x] Fix Cargo.toml edition (5 min) - Using edition 2024 with Rust 1.92+
 - [x] Remove duplicate tempfile dep (5 min) - Now only in dev-dependencies
 - [x] Fix error message escaping (10 min) - All messages use proper `\n`
+- [x] Update README.md (60 min) - All new commands documented
+- [x] Add module documentation (60 min)
+- [x] Add CHANGELOG (30 min)
 - [ ] Add `#[must_use]` attributes (30 min)
 - [ ] Make `Component::ALL` const (15 min)
-- [ ] Add shell completions (1 hour)
+- [x] Add shell completions (1 hour)
 
 ---
 

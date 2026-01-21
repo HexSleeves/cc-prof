@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`ccprof` is a CLI tool for managing multiple Claude Code settings profiles through symlink-based switching. The tool manipulates `~/.claude/settings.json` by creating symbolic links to profile-specific settings stored in `~/.claude-profiles/profiles/`.
+`ccprof` is a CLI tool for managing multiple Claude Code settings profiles through symlink-based switching. The tool manipulates `~/.claude/settings.json` (and other components like `agents/`, `hooks/`) by creating symbolic links to profile-specific settings stored in `~/.claude-profiles/profiles/`.
 
 ## Common Development Commands
 
@@ -43,11 +43,23 @@ cargo clippy
 ### Testing the CLI
 
 ```bash
-# Test specific commands
+# Basic workflows
 cargo run -- list
 cargo run -- add test-profile --from-current
 cargo run -- use test-profile
+cargo run -- current
 cargo run -- doctor
+
+# Inspect and Manage
+cargo run -- inspect test-profile
+cargo run -- diff test-profile default
+cargo run -- edit test-profile
+cargo run -- rename test-profile my-profile
+cargo run -- remove my-profile
+
+# Backup Management
+cargo run -- backup list
+cargo run -- backup clean --keep 5
 ```
 
 ## Architecture
@@ -64,6 +76,8 @@ The codebase follows a modular architecture with clear separation of concerns:
 
 - **`profiles.rs`**: Core profile management logic - listing, validation, existence checks. Does NOT handle switching; that's in `switch.rs`.
 
+- **`components.rs`**: Component definitions (Settings, Agents, etc.) and profile metadata management.
+
 - **`switch.rs`**: Profile switching logic with backup handling. Creates/updates symlinks at `~/.claude/settings.json` pointing to active profile. Implements safety mechanisms (backups before overwriting, broken symlink detection).
 
 - **`state.rs`**: Manages persistent state file (`~/.claude-profiles/state.json`) tracking the currently active profile name and last switch timestamp.
@@ -76,14 +90,16 @@ The codebase follows a modular architecture with clear separation of concerns:
 
 1. **Profile Creation** (`add` command):
    - Validates profile name (profiles.rs)
-   - Copies current `~/.claude/settings.json` to `~/.claude-profiles/profiles/<name>/settings.json`
-   - Validates JSON format
+   - Determines components to include (interactive or CLI arg)
+   - Copies current files from `~/.claude/` to `~/.claude-profiles/profiles/<name>/`
+   - Creates `metadata.json`
 
 2. **Profile Switching** (`use` command):
    - Checks profile exists (profiles.rs)
-   - Backs up existing `~/.claude/settings.json` if it's a regular file (switch.rs)
-   - Removes old symlink if present
-   - Creates new symlink pointing to selected profile
+   - For each managed component:
+     - Backs up existing file/dir if it's not a symlink (switch.rs)
+     - Removes old symlink if present
+     - Creates new symlink pointing to selected profile
    - Updates state.json with active profile name (state.rs)
 
 3. **Symlink Safety**:
@@ -97,10 +113,10 @@ The codebase follows a modular architecture with clear separation of concerns:
 All paths are centralized in the `Paths` struct:
 
 - `~/.claude-profiles/` - Base directory for ccprof data
-- `~/.claude-profiles/profiles/<name>/settings.json` - Individual profile settings
-- `~/.claude-profiles/backups/` - Timestamped backups of original settings
+- `~/.claude-profiles/profiles/<name>/` - Individual profile data
+- `~/.claude-profiles/backups/` - Timestamped backups
 - `~/.claude-profiles/state.json` - Tracks active profile
-- `~/.claude/settings.json` - Symlink target managed by ccprof
+- `~/.claude/` - Target directory for symlinks
 
 ## Important Patterns
 
